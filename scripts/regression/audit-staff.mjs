@@ -1,13 +1,18 @@
 /**
- * 员工（staff）视角敏感信息 absent 审计（指令57 A8 固化）。
+ * 员工（staff）视角敏感信息 absent 审计（指令57 A8 固化，指令58 A3/A6 扩围）。
  *
- * 断言双轨：
+ * 断言三轨：
  * - 文本轨：page.innerText（渲染后可见文本）不得包含敏感金额/口径串；
  * - 标签轨：敏感词不得作为「数据标签」渲染——即不得有叶子元素其完整文本
- *   等于该标签。此轨用于报表/对比页：页首说明句「…敏感列已按权限隐藏」是
- *   指向口径的说明文字（指令56 验收已定性保留），散文提及不算数据渲染。
+ *   等于该标签（区分数据标签与手册散文）；
+ * - 禁用串轨（指令58 A3 督工裁定）：店员可见的业务页一律不得出现
+ *   「无权限」「仅老板可见」「仅老板 / 合伙人可见」「敏感列已按权限隐藏」
+ *   「已按权限隐藏」——无权限内容整行/整节不渲染，不挂占位标签或说明行。
+ *   适用范围：店员可达的业务页（总览/仪表盘/报表/对比/工资/报销/成员/状态）；
+ *   /help 为手册文档（权限矩阵与说明文字是文档内容本身），不在此轨范围。
  *
- * 另含：成员页店员只见无权限提示（无邮箱、无授权控件）；
+ * 另含：成员页店员整段不渲染（无「成员列表与业务授权」标题、无邮箱、无授权控件）；
+ * 状态页工资对账行与抓取日志整节不渲染；
  * 成本/净利构成直进被拦回（URL 带 denied=，且目标页标志串不渲染）。
  *
  * 用法：node scripts/regression/audit-staff.mjs（本地演示服务，staff 会话）
@@ -37,6 +42,12 @@ function absentLabels(name, labels, list) {
 
 const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
 
+// 指令58 A3 禁用串轨：占位标签/说明行一律不得对店员出现。
+const FORBIDDEN = ["无权限", "仅老板可见", "仅老板 / 合伙人可见", "敏感列已按权限隐藏", "已按权限隐藏"];
+function absentForbidden(name, text) {
+  for (const s of FORBIDDEN) rep.check(`${name} 禁用串 absent「${s}」`, !text.includes(s));
+}
+
 // —— 总览 ——
 {
   const { page, resp } = await openPage("/");
@@ -44,6 +55,7 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   const t = await innerText(page);
   absentText("总览", t, ["扣成本后净利", "公司口径净利", "净利暂定", "工资占分润比", "利润率（分润）", "利润率（营收）", "年回报率", "工资成本"]);
   absentRegex("总览", t, NET_AMOUNTS);
+  absentForbidden("总览", t);
   await page.close();
 }
 
@@ -53,6 +65,7 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   const t = await innerText(page);
   absentText("仪表盘", t, ["净利暂定", "工资占分润比", "公司口径净利", "工资成本", "利润率（分润）"]);
   absentRegex("仪表盘", t, NET_AMOUNTS);
+  absentForbidden("仪表盘", t);
   await page.close();
 }
 
@@ -64,6 +77,7 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   absentLabels("报表", labels, ["工资成本", "工资占分润比", "人均分润", "净利暂定（元）", "净利暂定·扣成本后（元）", "2026-09 净利暂定（元）", "扣成本前净利暂定"]);
   absentText("报表", t, ["单店净利暂定 =", "净利暂定未扣房租水电", "净利暂定仅最新月为完整口径"]);
   absentRegex("报表", t, [/[-−]809\.45/, /[-−]5,503\.06/, /3,290\.59/, /1,580\.27/, /6,312\.51/]);
+  absentForbidden("报表", t);
   await page.close();
 }
 
@@ -74,6 +88,7 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   const labels = await exactLabels(page);
   absentLabels("对比", labels, ["门店成本", "净利暂定", "扣成本后净利暂定", "利润率（分润）", "利润率（营收）"]);
   absentRegex("对比", t, [/11,183\.37/, /[-−]5,503\.06/, /[-−]809\.45/, /[-−]35\.1%/]);
+  absentForbidden("对比", t);
   await page.close();
 }
 
@@ -83,6 +98,7 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   const t = await innerText(page);
   absentText("工资", t, ["工资实表明细", "双版本预览", "工资体系配置", "门店工资汇总", "244,757", "李冬浩", "王毅杰", "夏龙俊", "刘市伟"]);
   rep.check("工资 店员只见「我的薪酬」", t.includes("我的薪酬"));
+  absentForbidden("工资", t);
   await page.close();
 }
 
@@ -92,17 +108,32 @@ const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
   const t = await innerText(page);
   rep.check("报销 店员范围说明在位", t.includes("只显示你创建的报销单"));
   absentText("报销", t, ["全部明细", "全量汇总"]);
+  absentForbidden("报销", t);
   await page.close();
 }
 
-// —— 成员页（店员=仅无权限提示） ——
+// —— 成员页（店员=成员列表整段不渲染，指令58 A3 裁定） ——
 {
   const { page } = await openPage("/members");
   const t = await innerText(page);
-  rep.check("成员页 店员见无权限提示", t.includes("无权限：成员列表与业务授权仅老板可见可改"));
+  const labels = await exactLabels(page);
+  rep.check("成员页 店员无「成员列表与业务授权」标题", !labels.includes("成员列表与业务授权"));
+  absentText("成员页", t, ["成员列表与业务授权仅老板", "成员管理为只读"]);
   absentRegex("成员页", t, [/[\w.+-]+@[\w-]+\.[\w.]+/]);
   const boxes = await page.locator('input[type="checkbox"]').count();
   rep.check("成员页 店员无授权控件", boxes === 0, `checkbox=${boxes}`);
+  rep.check("成员页 店员仍见角色说明", t.includes("角色说明（三级）"));
+  absentForbidden("成员页", t);
+  await page.close();
+}
+
+// —— 状态页（店员=工资对账行整行不渲染、抓取日志整节不渲染，指令58 A3 裁定） ——
+{
+  const { page, resp } = await openPage("/status");
+  rep.check("状态页 HTTP 200", !!resp && resp.status() === 200);
+  const t = await innerText(page);
+  absentText("状态页", t, ["工资明细对账（实表 vs 月度汇总）", "最近抓取 / 导入日志", "请老板点"]);
+  absentForbidden("状态页", t);
   await page.close();
 }
 
