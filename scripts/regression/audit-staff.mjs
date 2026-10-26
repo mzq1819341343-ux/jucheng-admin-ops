@@ -1,0 +1,125 @@
+/**
+ * 员工（staff）视角敏感信息 absent 审计（指令57 A8 固化）。
+ *
+ * 断言双轨：
+ * - 文本轨：page.innerText（渲染后可见文本）不得包含敏感金额/口径串；
+ * - 标签轨：敏感词不得作为「数据标签」渲染——即不得有叶子元素其完整文本
+ *   等于该标签。此轨用于报表/对比页：页首说明句「…敏感列已按权限隐藏」是
+ *   指向口径的说明文字（指令56 验收已定性保留），散文提及不算数据渲染。
+ *
+ * 另含：成员页店员只见无权限提示（无邮箱、无授权控件）；
+ * 成本/净利构成直进被拦回（URL 带 denied=，且目标页标志串不渲染）。
+ *
+ * 用法：node scripts/regression/audit-staff.mjs（本地演示服务，staff 会话）
+ */
+import { launchBrowser, demoContext, Reporter, innerText, exactLabels, BASE } from "./lib.mjs";
+
+const rep = new Reporter("audit-staff");
+const browser = await launchBrowser();
+const ctx = await demoContext(browser, { role: "staff", viewport: { width: 1440, height: 1000 } });
+
+async function openPage(path) {
+  const page = await ctx.newPage();
+  const resp = await page.goto(BASE + path, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
+  await page.waitForTimeout(400);
+  return { page, resp };
+}
+
+function absentText(name, text, list) {
+  for (const s of list) rep.check(`${name} 文本 absent「${s}」`, !text.includes(s));
+}
+function absentRegex(name, text, list) {
+  for (const re of list) rep.check(`${name} 文本 absent ${re}`, !re.test(text));
+}
+function absentLabels(name, labels, list) {
+  for (const s of list) rep.check(`${name} 标签 absent「${s}」`, !labels.includes(s));
+}
+
+const NET_AMOUNTS = [/[-−]6,313/, /6,312\.51/, /[-−]11\.9%/];
+
+// —— 总览 ——
+{
+  const { page, resp } = await openPage("/");
+  rep.check("总览 HTTP 200", !!resp && resp.status() === 200);
+  const t = await innerText(page);
+  absentText("总览", t, ["扣成本后净利", "公司口径净利", "净利暂定", "工资占分润比", "利润率（分润）", "利润率（营收）", "年回报率", "工资成本"]);
+  absentRegex("总览", t, NET_AMOUNTS);
+  await page.close();
+}
+
+// —— 爱回收仪表盘 ——
+{
+  const { page } = await openPage("/business/aihuishou");
+  const t = await innerText(page);
+  absentText("仪表盘", t, ["净利暂定", "工资占分润比", "公司口径净利", "工资成本", "利润率（分润）"]);
+  absentRegex("仪表盘", t, NET_AMOUNTS);
+  await page.close();
+}
+
+// —— 经营报表 ——
+{
+  const { page } = await openPage("/business/aihuishou/reports");
+  const t = await innerText(page);
+  const labels = await exactLabels(page);
+  absentLabels("报表", labels, ["工资成本", "工资占分润比", "人均分润", "净利暂定（元）", "净利暂定·扣成本后（元）", "2026-09 净利暂定（元）", "扣成本前净利暂定"]);
+  absentText("报表", t, ["单店净利暂定 =", "净利暂定未扣房租水电", "净利暂定仅最新月为完整口径"]);
+  absentRegex("报表", t, [/[-−]809\.45/, /[-−]5,503\.06/, /3,290\.59/, /1,580\.27/, /6,312\.51/]);
+  await page.close();
+}
+
+// —— 两店对比 ——
+{
+  const { page } = await openPage("/business/aihuishou/compare");
+  const t = await innerText(page);
+  const labels = await exactLabels(page);
+  absentLabels("对比", labels, ["门店成本", "净利暂定", "扣成本后净利暂定", "利润率（分润）", "利润率（营收）"]);
+  absentRegex("对比", t, [/11,183\.37/, /[-−]5,503\.06/, /[-−]809\.45/, /[-−]35\.1%/]);
+  await page.close();
+}
+
+// —— 工资（店员=我的薪酬） ——
+{
+  const { page } = await openPage("/salary");
+  const t = await innerText(page);
+  absentText("工资", t, ["工资实表明细", "双版本预览", "工资体系配置", "门店工资汇总", "244,757", "李冬浩", "王毅杰", "夏龙俊", "刘市伟"]);
+  rep.check("工资 店员只见「我的薪酬」", t.includes("我的薪酬"));
+  await page.close();
+}
+
+// —— 报销（店员=只看自己） ——
+{
+  const { page } = await openPage("/expenses");
+  const t = await innerText(page);
+  rep.check("报销 店员范围说明在位", t.includes("只显示你创建的报销单"));
+  absentText("报销", t, ["全部明细", "全量汇总"]);
+  await page.close();
+}
+
+// —— 成员页（店员=仅无权限提示） ——
+{
+  const { page } = await openPage("/members");
+  const t = await innerText(page);
+  rep.check("成员页 店员见无权限提示", t.includes("无权限：成员列表与业务授权仅老板可见可改"));
+  absentRegex("成员页", t, [/[\w.+-]+@[\w-]+\.[\w.]+/]);
+  const boxes = await page.locator('input[type="checkbox"]').count();
+  rep.check("成员页 店员无授权控件", boxes === 0, `checkbox=${boxes}`);
+  await page.close();
+}
+
+// —— 直进拦截：门店成本 / 净利构成 ——
+for (const [name, path, marker] of [
+  ["成本直进", "/business/aihuishou/costs", "电费实报"],
+  ["净利构成直进", "/business/aihuishou/breakdown", "净利构成"],
+]) {
+  const page = await ctx.newPage();
+  await page.goto(BASE + path, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  const url = page.url();
+  const t = await innerText(page);
+  rep.check(`${name} 被拦回（denied）`, url.includes("denied="), url);
+  rep.check(`${name} 目标页标志 absent「${marker}」`, !t.includes(marker));
+  await page.close();
+}
+
+await browser.close();
+process.exit(rep.finish());
