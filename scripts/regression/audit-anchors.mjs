@@ -99,5 +99,38 @@ function hasRe(name, text, re) {
   await page.close();
 }
 
+// —— 目标复盘三分支（指令59 A2：demo_targets 注入，仅演示会话生效） ——
+// 注入三条目标：9 月分润目标 50,000（实际 53,220.60 → 106.4% 已达成）、
+// 9 月单量目标 500（实际 413 → 82.6% 未达成）、8 月净利目标 1,000
+// （实际缺完整口径 → 待核算）；其余行保持「未设定」。
+{
+  const targets = [
+    { month: "2026-09", metric: "profit", target_value: 50000 },
+    { month: "2026-09", metric: "orders", target_value: 500 },
+    { month: "2026-08", metric: "net_profit", target_value: 1000 },
+  ];
+  const ctx2 = await demoContext(browser, { role: "owner", viewport: { width: 1440, height: 1000 } });
+  await ctx2.addCookies([
+    {
+      name: "demo_targets",
+      value: Buffer.from(JSON.stringify(targets), "utf8").toString("base64url"),
+      url: BASE,
+    },
+  ]);
+  const page = await ctx2.newPage();
+  const resp = await page.goto(BASE + "/business/aihuishou/reports", { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
+  rep.check("复盘三分支 HTTP 200", !!resp && resp.status() === 200);
+  await page.waitForTimeout(400);
+  const t = await innerText(page);
+  has("复盘三分支", t, "已达成");
+  has("复盘三分支", t, "未达成");
+  has("复盘三分支", t, "待核算");
+  has("复盘三分支", t, "未设定");
+  has("复盘三分支", t, "106.4%");
+  has("复盘三分支", t, "82.6%");
+  await page.close();
+  await ctx2.close();
+}
+
 await browser.close();
 process.exit(rep.finish());

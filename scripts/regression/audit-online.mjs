@@ -68,4 +68,16 @@ try {
   rep.info(`本地演示服务不可达，图注日期断言跳过（全跑时必跑）：${e.message}`);
 }
 
+// 6) 生产恒忽略演示注入（指令59 A2）：带 demo_targets 注入 Cookie 仍 307
+{
+  const inj = Buffer.from(
+    JSON.stringify([{ month: "2026-09", metric: "profit", target_value: 1 }]),
+    "utf8"
+  ).toString("base64url");
+  for (const p of ["/", "/business/aihuishou/reports"]) {
+    const r = await get(p, { cookie: `demo_role=owner; demo_biz=all; demo_targets=${inj}` });
+    rep.check(`伪造 demo_targets 注入 ${p} → 307`, r.status === 307, `status=${r.status}`);
+  }
+}
+
 process.exit(rep.finish());
