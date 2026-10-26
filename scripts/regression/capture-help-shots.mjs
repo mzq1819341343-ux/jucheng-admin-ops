@@ -15,6 +15,9 @@
  * 更新为运行当日（Asia/Shanghai），图注日期不再靠手工对齐。
  * 指令60 A3：两张手机长图截后经 quantize_png.py 做 256 色量化（全分辨率，
  * 体积约 −60%）；PIL 不可用时保留原图并警告。
+ * 指令61 A5：量化后处理扩至全八图（桌面六图评估达标线 PSNR ≥ 40dB、
+ * 目检无色带、体积降幅 ≥40%，实测六图 −60%~−63%、PSNR 45.2~54.8dB，
+ * 评估表见 docs/运维_性能基线.md）；达标名单即下方 QUANTIZE_FILES。
  * 用法：node scripts/regression/capture-help-shots.mjs（需本地演示服务已启动）
  */
 import { launchBrowser, BASE } from "./lib.mjs";
@@ -116,20 +119,25 @@ for (const [name, path] of [["mobile-overview.png", "/"], ["mobile-expenses.png"
 await mctx.close();
 await browser.close();
 
-// ---------- 手机长图量化后处理（指令60 A3） ----------
-// 两张手机全页长图体积最大，截后做 256 色调色板量化（全分辨率不变，
-// 实测 −58%/−62%，目检无色带）。依赖 python3 + PIL：不可用时保留原图
-// 并打印警告，不让截图刷新整体失败。
+// ---------- 量化后处理（指令60 A3 手机两图；指令61 A5 扩至全八图） ----------
+// 截后做 256 色调色板量化（全分辨率不变；手机两图实测 −58%/−62%，桌面
+// 六图 −60%~−63%，目检无色带、PSNR 均 ≥45dB）。名单为历轮评估达标集：
+// 新增截图先离线评估达标（PSNR ≥ 40dB + 目检）再入名单。依赖 python3
+// + PIL：不可用时保留原图并打印警告，不让截图刷新整体失败。
+const QUANTIZE_FILES = [
+  "overview.png", "expenses.png", "salary-rule-preview.png", "costs-utilities.png",
+  "dashboard-drill.png", "compare.png", "mobile-overview.png", "mobile-expenses.png",
+];
 try {
   const script = join(dirname(fileURLToPath(import.meta.url)), "quantize_png.py");
   const out = execFileSync(
     "python3",
-    [script, join(OUT, "mobile-overview.png"), join(OUT, "mobile-expenses.png")],
+    [script, ...QUANTIZE_FILES.map((f) => join(OUT, f))],
     { encoding: "utf8" }
   );
   console.log(out.trim());
 } catch (e) {
-  console.log(`warn: 手机长图量化跳过（python3/PIL 不可用），保留原图：${e.message}`);
+  console.log(`warn: 量化后处理跳过（python3/PIL 不可用），保留原图：${e.message}`);
 }
 console.log(`done -> ${OUT}`);
 
