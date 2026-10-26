@@ -207,6 +207,7 @@ title text not null, -- 岗位 / 职级名
 base_salary numeric(12, 2), -- 底薪（可空）
 commission_rules jsonb not null default '{}'::jsonb, -- 提成规则（结构化配置）
 note text,
+effective_from text, -- 生效起始月 'YYYY-MM'（指令42，可空 = 待老板补填，支持双版本回算）
 updated_by uuid references public.profiles (id),
 updated_at timestamptz not null default now()
 );
@@ -302,6 +303,127 @@ grant select, insert, update, delete on public.salary_rules to authenticated;
 grant select, insert, update, delete on public.salary_monthly to authenticated;
 grant select, insert, update, delete on public.store_costs to authenticated;
 grant select on public.salary_store_monthly_agg to authenticated;
+
+-- ---------- 两店合同台账 + 房租成本种子 + 工资规则落库（指令42；与 migration_004 保持一致） ----------
+-- 保证金只登记、不进月成本；电费 / 联营扣点 / 管理费无实际金额不插行（未取得，未计入）。
+create table if not exists public.store_contracts (
+id uuid primary key default gen_random_uuid(),
+scope text not null check (scope in ('wanda', 'friendship')),
+title text not null, -- 合同名
+party_a text, -- 甲方
+party_b text, -- 乙方
+location text, -- 点位
+area_sqm numeric(10, 2), -- 面积（㎡）
+term_start date,
+term_end date,
+monthly_fee numeric(12, 2), -- 月费（综合服务费 / 月摊口径）
+fee_breakdown jsonb not null default '{}'::jsonb, -- 费用构成
+payment_cycle text, -- 支付方式说明
+deposit_total numeric(12, 2), -- 保证金合计（只登记，不进月成本）
+note text,
+updated_by uuid references public.profiles (id),
+updated_at timestamptz not null default now(),
+unique (scope, term_start)
+);
+
+alter table public.store_contracts enable row level security;
+
+drop policy if exists store_contracts_owner_all on public.store_contracts;
+create policy store_contracts_owner_all on public.store_contracts
+for all to authenticated
+using (public.current_role() = 'owner')
+with check (public.current_role() = 'owner');
+
+drop policy if exists store_contracts_partner_read on public.store_contracts;
+create policy store_contracts_partner_read on public.store_contracts
+for select to authenticated
+using (public.current_role() = 'partner');
+
+grant select, insert, update, delete on public.store_contracts to authenticated;
+
+-- 工资规则全员可读（「工资怎么算」规则卡全角色可见；写入仍仅 owner）
+drop policy if exists salary_rules_read_all on public.salary_rules;
+create policy salary_rules_read_all on public.salary_rules
+for select to authenticated using (true);
+
+-- 合同台账种子（两行）
+insert into public.store_contracts
+  (scope, title, party_a, party_b, location, area_sqm, term_start, term_end,
+   monthly_fee, fee_breakdown, payment_cycle, deposit_total, note)
+values
+  ('wanda', '万达广场展示点位综合服务合同',
+   '石河子市聚成云科网络科技有限公司', '石河子市万达广场商业管理有限公司',
+   '万达广场 2F JY-BX-206', 12, '2026-11-28', '2027-11-27',
+   4509.60, '{"展示费": 3921.60, "物业费": 588.00}'::jsonb,
+   '按季支付；首期 13979.76（2026-11-28~2027-02-28）', 14019.20,
+   '签约主体：石河子市聚成云科网络科技有限公司 × 石河子市万达广场商业管理有限公司；月综合服务费（含税）4509.60 = 展示费 3921.60 + 物业费 588.00，年合计 54115.20；保证金 = 履约 9019.20 + 质量 5000，只登记不进月成本；电费自装智能电表按量预缴，按月实填'),
+  ('friendship', '壹加壹小吃街租赁合同',
+   '壹加壹小吃街（甲方，出租方）', '张森',
+   '友谊大厦负一层摊位 111', 22, '2026-02-01', '2027-01-31',
+   7083.33, '{"年租金": 85000, "月摊": 7083.33, "联营扣点": "营业额 8%（按月实际发生时录入）", "管理费": "自 2026-02-01 起计，金额以账单为准"}'::jsonb,
+   '年租金一次付清', 13000.00,
+   '合同署名乙方为张森，业务口径门店名为友谊；年租金 85000 已一次付清，按月摊 7083.33 记房租；联营扣点为营业额 8%（甲方提供收银机），按月实际发生时以「其他」类型录入；管理费自 2026-02-01 起计、金额以账单为准，未取得前不计入；另有免租至 2027-02-07；保证金 = 履约 10000 + 设备押金 3000，只登记不进月成本；甲方名称以合同原文为准（此处按老板提供口径登记）')
+on conflict (scope, term_start) do nothing;
+
+-- 两店成本种子：友谊房租月摊 2026-02~2027-01（每月 7083.33）
+insert into public.store_costs (scope, month, cost_type, amount, note) values
+  ('friendship', '2026-02', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-03', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-04', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-05', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-06', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-07', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-08', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-09', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-10', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-11', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2026-12', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）'),
+  ('friendship', '2027-01', 'rent', 7083.33, '年租金 85000 月摊（合同期至 2027-01-31）')
+on conflict (scope, month, cost_type) do nothing;
+
+-- 两店成本种子：万达展示费（房租）2026-11~2027-10（每月 3921.60）
+insert into public.store_costs (scope, month, cost_type, amount, note) values
+  ('wanda', '2026-11', 'rent', 3921.60, '合同综合服务费之展示费；合同 2026-11-28 生效，首月按整月口径'),
+  ('wanda', '2026-12', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-01', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-02', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-03', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-04', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-05', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-06', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-07', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-08', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-09', 'rent', 3921.60, '合同综合服务费之展示费'),
+  ('wanda', '2027-10', 'rent', 3921.60, '合同综合服务费之展示费')
+on conflict (scope, month, cost_type) do nothing;
+
+-- 两店成本种子：万达物业费（其他）同上 12 个月（每月 588.00）
+insert into public.store_costs (scope, month, cost_type, amount, note) values
+  ('wanda', '2026-11', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2026-12', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-01', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-02', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-03', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-04', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-05', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-06', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-07', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-08', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-09', 'other', 588.00, '合同综合服务费之物业费'),
+  ('wanda', '2027-10', 'other', 588.00, '合同综合服务费之物业费')
+on conflict (scope, month, cost_type) do nothing;
+
+-- 工资体系规则种子（老板口述版，生效起始月待补填）
+insert into public.salary_rules (title, base_salary, commission_rules, note, effective_from)
+select
+  '通用工资体系（老板口述版）',
+  2000,
+  '{"base_breakdown": {"basic": 1000, "attendance": 500, "new_customer": 500, "note": "拉新非交口径待工资表模板到后核对，先按老板口述原样记录"}, "online_order_pct": 1, "store_tiers": [{"threshold": 30000, "pct": 3}, {"threshold": 60000, "pct": 4, "note": "阶梯取最高达成档"}], "accessories_tiers": [{"below": 6500, "pct": 20}, {"threshold": 6500, "pct": 30}, {"threshold": 10000, "pct": 40}], "door_profit_pct": 50}'::jsonb,
+  '老板 2026-10-26 口述；历史规则几个月前改过，生效起始月待老板补填后支持双版本回算',
+  null
+where not exists (
+  select 1 from public.salary_rules where title = '通用工资体系（老板口述版）'
+);
 
 -- ---------- 新注册用户自动建档（默认 staff，老板再改角色） ----------
 create or replace function public.handle_new_user()
