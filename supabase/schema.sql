@@ -595,3 +595,33 @@ create policy site_targets_read_all on public.site_targets
   using (true);
 
 grant select, insert, update, delete on public.site_targets to authenticated;
+
+-- ============================================================
+-- 迁移 006：工资实表明细导入表（指令47）—— 与 migration_006_salary_detail.sql 同步
+-- 仅老板可见（RLS 只有 owner 策略）；明细由私有导入文件写入，禁止入仓。
+-- ============================================================
+
+create table if not exists public.salary_detail_import (
+  id uuid primary key default gen_random_uuid(),
+  month text not null check (month ~ '^\d{4}-\d{2}$'),
+  section text not null check (section in ('store', 'door')),
+  employee_name text not null,
+  base_amount numeric(12, 2),
+  commission_amount numeric(12, 2),
+  deduction_amount numeric(12, 2),
+  net_amount numeric(12, 2),
+  note text,
+  matched_user_id uuid references public.profiles (id),
+  imported_at timestamptz not null default now(),
+  unique (employee_name, month, section)
+);
+
+alter table public.salary_detail_import enable row level security;
+
+drop policy if exists salary_detail_import_owner_all on public.salary_detail_import;
+create policy salary_detail_import_owner_all on public.salary_detail_import
+  for all to authenticated
+  using (public.current_role() = 'owner')
+  with check (public.current_role() = 'owner');
+
+grant select, insert, update, delete on public.salary_detail_import to authenticated;
