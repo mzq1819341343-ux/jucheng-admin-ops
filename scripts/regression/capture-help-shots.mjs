@@ -13,12 +13,15 @@
  * 全部为演示数据截图，/help 图注已统一标注「示例截图（演示数据）」与刷新日期。
  * 指令58 A2：截图完成后自动把 app/help/page.tsx 八处「截图刷新：YYYY-MM-DD」
  * 更新为运行当日（Asia/Shanghai），图注日期不再靠手工对齐。
+ * 指令60 A3：两张手机长图截后经 quantize_png.py 做 256 色量化（全分辨率，
+ * 体积约 −60%）；PIL 不可用时保留原图并警告。
  * 用法：node scripts/regression/capture-help-shots.mjs（需本地演示服务已启动）
  */
 import { launchBrowser, BASE } from "./lib.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
 const browser = await launchBrowser();
@@ -112,6 +115,22 @@ for (const [name, path] of [["mobile-overview.png", "/"], ["mobile-expenses.png"
 }
 await mctx.close();
 await browser.close();
+
+// ---------- 手机长图量化后处理（指令60 A3） ----------
+// 两张手机全页长图体积最大，截后做 256 色调色板量化（全分辨率不变，
+// 实测 −58%/−62%，目检无色带）。依赖 python3 + PIL：不可用时保留原图
+// 并打印警告，不让截图刷新整体失败。
+try {
+  const script = join(dirname(fileURLToPath(import.meta.url)), "quantize_png.py");
+  const out = execFileSync(
+    "python3",
+    [script, join(OUT, "mobile-overview.png"), join(OUT, "mobile-expenses.png")],
+    { encoding: "utf8" }
+  );
+  console.log(out.trim());
+} catch (e) {
+  console.log(`warn: 手机长图量化跳过（python3/PIL 不可用），保留原图：${e.message}`);
+}
 console.log(`done -> ${OUT}`);
 
 // ---------- 图注日期自动对齐（指令58 A2） ----------
