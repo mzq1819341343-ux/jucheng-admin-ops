@@ -198,6 +198,111 @@ insert into public.user_business_access (user_id, business_id)
 select id, 'aihuishou' from public.profiles where role = 'owner'
 on conflict do nothing;
 
+-- ---------- 工资体系 + 两店成本（指令41；与 migration_003 保持一致） ----------
+-- 只建骨架、不插种子行：工资规则与成本数字等老板提供后录入。
+-- salary_monthly 只存员工可见口径的月度构成，禁止工资原表整表入库上前台。
+create table if not exists public.salary_rules (
+id uuid primary key default gen_random_uuid(),
+title text not null, -- 岗位 / 职级名
+base_salary numeric(12, 2), -- 底薪（可空）
+commission_rules jsonb not null default '{}'::jsonb, -- 提成规则（结构化配置）
+note text,
+updated_by uuid references public.profiles (id),
+updated_at timestamptz not null default now()
+);
+
+create table if not exists public.salary_monthly (
+id uuid primary key default gen_random_uuid(),
+user_id uuid not null references public.profiles (id) on delete cascade,
+month text not null check (month ~ '^\d{4}-\d{2}$'),
+scope text not null check (scope in ('wanda', 'friendship')), -- 所属门店
+base_amount numeric(12, 2), -- 底薪部分
+commission_amount numeric(12, 2), -- 提成部分
+deduction_amount numeric(12, 2), -- 扣款部分
+net_amount numeric(12, 2) not null, -- 实发
+note text,
+published boolean not null default false, -- 发布后员工才可见
+created_by uuid references public.profiles (id),
+updated_at timestamptz not null default now(),
+unique (user_id, month)
+);
+
+create table if not exists public.store_costs (
+id uuid primary key default gen_random_uuid(),
+scope text not null check (scope in ('wanda', 'friendship')),
+month text not null check (month ~ '^\d{4}-\d{2}$'),
+cost_type text not null check (cost_type in ('rent', 'utilities', 'other')), -- 房租/水电/其他
+amount numeric(12, 2) not null,
+note text,
+created_by uuid references public.profiles (id),
+updated_at timestamptz not null default now(),
+unique (scope, month, cost_type)
+);
+
+-- 门店月度工资汇总视图（partner 专用：只有汇总，无按人明细；行过滤见 where）
+create or replace view public.salary_store_monthly_agg as
+select
+scope,
+month,
+count(*)::int as headcount,
+sum(net_amount) as total_net,
+sum(base_amount) as total_base,
+sum(commission_amount) as total_commission
+from public.salary_monthly
+where published = true
+  and (
+    public.current_role() = 'owner'
+    or (
+      public.current_role() = 'partner'
+      and public.has_business_access('aihuishou')
+    )
+  )
+group by scope, month;
+
+alter table public.salary_rules enable row level security;
+alter table public.salary_monthly enable row level security;
+alter table public.store_costs enable row level security;
+
+-- salary_rules：仅老板可读可写
+drop policy if exists salary_rules_owner_all on public.salary_rules;
+create policy salary_rules_owner_all on public.salary_rules
+for all to authenticated
+using (public.current_role() = 'owner')
+with check (public.current_role() = 'owner');
+
+-- salary_monthly：老板全权；店员只能读自己已发布的行；partner 无本表策略（走汇总视图）
+drop policy if exists salary_monthly_owner_all on public.salary_monthly;
+create policy salary_monthly_owner_all on public.salary_monthly
+for all to authenticated
+using (public.current_role() = 'owner')
+with check (public.current_role() = 'owner');
+
+drop policy if exists salary_monthly_staff_read_own on public.salary_monthly;
+create policy salary_monthly_staff_read_own on public.salary_monthly
+for select to authenticated
+using (
+  public.current_role() = 'staff'
+  and user_id = auth.uid()
+  and published = true
+);
+
+-- store_costs：老板全权可写；合伙人可读；staff 无策略 = 不可见
+drop policy if exists store_costs_owner_all on public.store_costs;
+create policy store_costs_owner_all on public.store_costs
+for all to authenticated
+using (public.current_role() = 'owner')
+with check (public.current_role() = 'owner');
+
+drop policy if exists store_costs_partner_read on public.store_costs;
+create policy store_costs_partner_read on public.store_costs
+for select to authenticated
+using (public.current_role() = 'partner');
+
+grant select, insert, update, delete on public.salary_rules to authenticated;
+grant select, insert, update, delete on public.salary_monthly to authenticated;
+grant select, insert, update, delete on public.store_costs to authenticated;
+grant select on public.salary_store_monthly_agg to authenticated;
+
 -- ---------- 新注册用户自动建档（默认 staff，老板再改角色） ----------
 create or replace function public.handle_new_user()
 returns trigger
