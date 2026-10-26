@@ -11,9 +11,12 @@
  * - dashboard-drill 先展开「门店成本」一级下钻与两店二级下钻再截 net-panel。
  *
  * 全部为演示数据截图，/help 图注已统一标注「示例截图（演示数据）」与刷新日期。
+ * 指令58 A2：截图完成后自动把 app/help/page.tsx 八处「截图刷新：YYYY-MM-DD」
+ * 更新为运行当日（Asia/Shanghai），图注日期不再靠手工对齐。
  * 用法：node scripts/regression/capture-help-shots.mjs（需本地演示服务已启动）
  */
 import { launchBrowser, BASE } from "./lib.mjs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,3 +113,14 @@ for (const [name, path] of [["mobile-overview.png", "/"], ["mobile-expenses.png"
 await mctx.close();
 await browser.close();
 console.log(`done -> ${OUT}`);
+
+// ---------- 图注日期自动对齐（指令58 A2） ----------
+const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+const helpPath = join(OUT, "..", "..", "app", "help", "page.tsx");
+const helpSrc = readFileSync(helpPath, "utf8");
+const captionDates = helpSrc.match(/截图刷新：\d{4}-\d{2}-\d{2}/g) || [];
+const helpNext = helpSrc.replace(/截图刷新：\d{4}-\d{2}-\d{2}/g, `截图刷新：${today}`);
+if (helpNext !== helpSrc) writeFileSync(helpPath, helpNext);
+console.log(
+  `help captions: ${captionDates.length} 处「截图刷新」日期 -> ${today}${helpNext === helpSrc ? "（已是当日，无改动）" : "（已更新）"}`
+);

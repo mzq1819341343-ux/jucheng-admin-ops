@@ -6,11 +6,14 @@
  * 1) /login 返回 200 且页面中「演示」出现 0 次（生产零演示入口）；
  * 2) 未登录访问六条登录后路径全部 307 → /login；
  * 3) 伪造 demo Cookie（demo_role=owner）访问仍 307（生产演示不可进）；
- * 4) /help-shots 八张图全部 200 且 content-type 为 image/png。
+ * 4) /help-shots 八张图全部 200 且 content-type 为 image/png；
+ * 5) /help 图注日期（指令58 A2）：生产 /help 未登录 307 读不到正文，图注随同一次
+ *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
+ *    存在、格式正确且为同一日；本地服务不可达时 info 跳过（全跑时必跑）。
  *
  * 用法：node scripts/regression/audit-online.mjs（REG_ONLINE 可覆盖目标）
  */
-import { Reporter, ONLINE } from "./lib.mjs";
+import { Reporter, ONLINE, BASE } from "./lib.mjs";
 
 const rep = new Reporter("audit-online");
 
@@ -45,6 +48,24 @@ for (const f of ["overview.png", "expenses.png", "salary-rule-preview.png", "cos
   const r = await get(`/help-shots/${f}`);
   const ct = r.headers.get("content-type") || "";
   rep.check(`help-shots/${f} 200 png`, r.status === 200 && ct.includes("image/png"), `status=${r.status} ct=${ct}`);
+}
+
+// 5) /help 图注日期存在且格式正确（指令58 A2；对本地演示构建的同一 /help 断言）
+try {
+  const r = await fetch(BASE + "/help", { headers: { cookie: "demo_role=owner; demo_biz=all" } });
+  if (r.status !== 200) throw new Error(`status=${r.status}`);
+  const html = await r.text();
+  // 剥离 <script>（RSC 载荷会把正文再嵌一份），只数渲染正文里的图注。
+  const bodyHtml = html.replace(/<script[\s\S]*?<\/script>/g, "");
+  const dates = [...bodyHtml.matchAll(/截图刷新：(\d{4})-(\d{2})-(\d{2})/g)].map((m) => m[0].replace("截图刷新：", ""));
+  rep.check("/help 图注「截图刷新」共 8 处", dates.length === 8, `count=${dates.length}`);
+  rep.check(
+    "/help 图注日期格式 YYYY-MM-DD 且八处同一日",
+    dates.length === 8 && dates.every((d) => d === dates[0]),
+    dates.join(",")
+  );
+} catch (e) {
+  rep.info(`本地演示服务不可达，图注日期断言跳过（全跑时必跑）：${e.message}`);
 }
 
 process.exit(rep.finish());
