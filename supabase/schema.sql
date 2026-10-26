@@ -32,6 +32,7 @@ create table if not exists public.monthly_metrics (
 id bigint generated always as identity primary key,
 month text not null check (month ~ '^\d{4}-\d{2}$'), -- '2026-09'
 scope text not null check (scope in ('combined', 'wanda', 'friendship')),
+business_id text not null default 'aihuishou', -- 所属业务板块（多业务架构，见文末 002 节）
 orders integer, -- 单量（combined=总单量；门店行=到店单量）
 profit numeric(14, 2), -- 分润（combined=总分润；门店行=到店分润）
 door_orders integer, -- 上门单量（仅 combined 行有值）
@@ -55,6 +56,30 @@ message text,
 created_at timestamptz not null default now()
 );
 
+-- ---------- 业务板块（多业务架构，指令33；与 migration_002 保持一致） ----------
+create table if not exists public.businesses (
+id text primary key, -- 'aihuishou' | 'future' | 后续新业务
+name text not null,
+status text not null default 'active'
+check (status in ('active', 'coming_soon')),
+sort int not null default 0,
+created_at timestamptz not null default now()
+);
+
+insert into public.businesses (id, name, status, sort) values
+  ('aihuishou', '爱回收', 'active', 1),
+  ('future', '更多业务', 'coming_soon', 99)
+on conflict (id) do nothing;
+
+-- ---------- 用户-业务授权（按板块单独授权） ----------
+create table if not exists public.user_business_access (
+user_id uuid not null references public.profiles (id) on delete cascade,
+business_id text not null references public.businesses (id),
+granted_by uuid references public.profiles (id),
+created_at timestamptz not null default now(),
+primary key (user_id, business_id)
+);
+
 -- ---------- 当前登录用户角色（RLS 辅助函数，避免策略自引用递归） ----------
 create or replace function public.current_role()
 returns text
@@ -66,11 +91,28 @@ as $$
 select role from public.profiles where id = auth.uid()
 $$;
 
+-- ---------- 业务授权判断（owner 不受限；其他角色看授权表） ----------
+create or replace function public.has_business_access(bid text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+select
+  public.current_role() = 'owner'
+  or exists (
+    select 1 from public.user_business_access a
+    where a.user_id = auth.uid() and a.business_id = bid
+  )
+$$;
+
 -- ---------- 运营视图（给 staff 用：只含非敏感列） ----------
 -- 说明：monthly_metrics 本表对 staff 不授任何 SELECT（见下方 RLS），
 -- staff 只能查这个视图。视图默认以视图属主权限执行（非 security_invoker），
 -- 因此能读到本表数据，但只暴露 月份/单量/分润/上门/单均 五类非敏感字段，
 -- 工资成本、工资占比、人均、净利等敏感列根本不在视图里，查不到。
+-- 视图带 business_id 并按业务授权过滤（未授权板块的行查不到）。
 create or replace view public.v_ops_metrics as
 select
 month,
@@ -78,14 +120,34 @@ scope,
 orders,
 profit,
 door_orders,
-avg_profit
-from public.monthly_metrics;
+avg_profit,
+business_id
+from public.monthly_metrics
+where public.has_business_access(business_id);
 
 -- ---------- RLS ----------
 alter table public.stores enable row level security;
 alter table public.profiles enable row level security;
 alter table public.monthly_metrics enable row level security;
 alter table public.fetch_logs enable row level security;
+alter table public.businesses enable row level security;
+alter table public.user_business_access enable row level security;
+
+-- businesses：所有已登录用户可读（入口展示用）
+drop policy if exists businesses_read on public.businesses;
+create policy businesses_read on public.businesses
+for select to authenticated using (true);
+
+-- user_business_access：本人可读自己的；owner 可读全部、可增删改（成员页勾选走 owner）
+drop policy if exists access_read_self on public.user_business_access;
+create policy access_read_self on public.user_business_access
+for select to authenticated using (user_id = auth.uid());
+
+drop policy if exists access_owner_all on public.user_business_access;
+create policy access_owner_all on public.user_business_access
+for all to authenticated
+using (public.current_role() = 'owner')
+with check (public.current_role() = 'owner');
 
 -- stores：所有已登录用户可读
 drop policy if exists stores_read on public.stores;
@@ -103,11 +165,16 @@ for all to authenticated
 using (public.current_role() = 'owner')
 with check (public.current_role() = 'owner');
 
--- monthly_metrics：仅 owner / partner 可读本表；staff 无策略 = 读不到（含敏感列隔离）
+-- monthly_metrics：仅 owner / partner 可读本表且须有该业务授权（owner 不受限）；
+-- staff 无策略 = 读不到本表（含敏感列隔离），只能走 v_ops_metrics 视图
 drop policy if exists metrics_read_owner_partner on public.monthly_metrics;
-create policy metrics_read_owner_partner on public.monthly_metrics
+drop policy if exists metrics_read_business on public.monthly_metrics;
+create policy metrics_read_business on public.monthly_metrics
 for select to authenticated
-using (public.current_role() in ('owner', 'partner'));
+using (
+  public.current_role() in ('owner', 'partner')
+  and public.has_business_access(business_id)
+);
 
 -- 写入只走 service_role（导入脚本/后台任务），前端不直写
 -- fetch_logs：owner / partner 可读
@@ -123,6 +190,13 @@ grant select on public.v_ops_metrics to authenticated; -- staff 的唯一数据�
 grant select on public.stores to authenticated;
 grant select, insert, update, delete on public.profiles to authenticated; -- 行级由 RLS 收口
 grant select on public.fetch_logs to authenticated;
+grant select on public.businesses to authenticated;
+grant select, insert, update, delete on public.user_business_access to authenticated; -- 行级由 RLS 收口
+
+-- 存量/首个 owner 补爱回收授权行（幂等）
+insert into public.user_business_access (user_id, business_id)
+select id, 'aihuishou' from public.profiles where role = 'owner'
+on conflict do nothing;
 
 -- ---------- 新注册用户自动建档（默认 staff，老板再改角色） ----------
 create or replace function public.handle_new_user()

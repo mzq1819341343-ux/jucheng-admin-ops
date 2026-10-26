@@ -9,6 +9,12 @@ insert into public.stores (id, name) values
   ('friendship', '石河子友谊商厦店')
 on conflict (id) do nothing;
 
+-- ---------- 业务板块（多业务架构；schema/migration 已建表，这里补种子幂等） ----------
+insert into public.businesses (id, name, status, sort) values
+  ('aihuishou', '爱回收', 'active', 1),
+  ('future', '更多业务', 'coming_soon', 99)
+on conflict (id) do nothing;
+
 -- ---------- 两店合计（combined） ----------
 -- 人均分润 = 分润 / 当月人数（人数 4/4/6/8/8/7/7/7/8）；人均单量 = 单量 / 人数。
 -- 净利暂定逐月无现成数，仅 2026-09 有两店合计 4,870.86（= 万达 3,290.59 + 友谊 1,580.27）。
