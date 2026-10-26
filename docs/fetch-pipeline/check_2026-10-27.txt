@@ -1,0 +1,10 @@
+[OK] 目录 muse_v3
+[OK] 目录 muse_v3/data/orders
+[OK] 目录 muse_v3/data/statements
+[OK] 驾驶舱脚本 scripts/update_cockpit_v3.py
+[OK] 待启用配置.md
+[OK] 状态目录可写 auto_fetch/status
+登录状态：need_user_login（据状态记录.md）
+调度口径：每日 09:30 增量抓取；每月 3 日 10:00 上月整月；时区 Asia/Shanghai
+管道状态：已备未启用（自检不登录、不抓数）
+自检结论：全部通过
