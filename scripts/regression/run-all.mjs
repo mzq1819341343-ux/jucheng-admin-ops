@@ -1,6 +1,7 @@
 /**
- * 回归一键全跑（指令57 A8）：依次执行 audit-390、audit-staff、audit-online，
- * 任一失败整体退出码非 0。前两项需要本地演示服务（REG_BASE），第三项打线上。
+ * 回归一键全跑（指令57 A8，指令58 A5 扩围）：依次执行 audit-390、audit-staff、
+ * audit-anchors、audit-online，任一失败整体退出码非 0。前三项需要本地演示
+ * 服务（REG_BASE），第四项打线上。
  *
  * 前置（详见 docs/运维_回归清单.md）：
  *   NEXT_PUBLIC_ALLOW_DEMO=1 npm run build && PORT=3100 npm run start
@@ -24,7 +25,7 @@ try {
 }
 
 let code = 0;
-for (const f of ["audit-390.mjs", "audit-staff.mjs", "audit-online.mjs"]) {
+for (const f of ["audit-390.mjs", "audit-staff.mjs", "audit-anchors.mjs", "audit-online.mjs"]) {
   console.log(`\n===== ${f} =====`);
   const r = spawnSync(process.execPath, [`${here}/${f}`], { stdio: "inherit", env: process.env });
   if (r.status !== 0) code = 1;
