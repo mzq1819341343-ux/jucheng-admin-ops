@@ -21,7 +21,7 @@ import { launchBrowser, demoContext, Reporter, innerText, exactLabels, BASE } fr
 
 const rep = new Reporter("audit-staff");
 const browser = await launchBrowser();
-const ctx = await demoContext(browser, { role: "staff", viewport: { width: 1440, height: 1000 } });
+let ctx = await demoContext(browser, { role: "staff", viewport: { width: 1440, height: 1000 } });
 
 async function openPage(path) {
   const page = await ctx.newPage();
@@ -149,6 +149,71 @@ for (const [name, path, marker] of [
   const t = await innerText(page);
   rep.check(`${name} 被拦回（denied）`, url.includes("denied="), url);
   rep.check(`${name} 目标页标志 absent「${marker}」`, !t.includes(marker));
+  await page.close();
+}
+
+// ============================================================
+// 合伙人轨（指令58 A6）：可见经营汇总，不可见明细与个人工资。
+// ============================================================
+await ctx.close();
+ctx = await demoContext(browser, { role: "partner", viewport: { width: 1440, height: 1000 } });
+
+function presentText(name, text, list) {
+  for (const s of list) rep.check(`${name} 合伙人可见「${s}」`, text.includes(s));
+}
+
+// —— 总览（合伙人）：敏感汇总可见 ——
+{
+  const { page, resp } = await openPage("/");
+  rep.check("合伙人 总览 HTTP 200", !!resp && resp.status() === 200);
+  const t = await innerText(page);
+  presentText("合伙人总览", t, ["扣成本后净利", "利润率（分润）"]);
+  await page.close();
+}
+
+// —— 报表（合伙人）：敏感列与目标复盘可见 ——
+{
+  const { page } = await openPage("/business/aihuishou/reports");
+  const t = await innerText(page);
+  presentText("合伙人报表", t, ["工资成本", "目标达成复盘"]);
+  await page.close();
+}
+
+// —— 工资（合伙人）：只看门店汇总，无个人明细/配置/实表 ——
+{
+  const { page } = await openPage("/salary");
+  const t = await innerText(page);
+  presentText("合伙人工资", t, ["门店月度工资汇总"]);
+  absentText("合伙人工资", t, ["工资实表明细", "工资体系配置", "员工月度工资", "我的薪酬", "李冬浩", "王毅杰", "夏龙俊", "刘市伟", "244,757"]);
+  await page.close();
+}
+
+// —— 报销（合伙人）：只有按月汇总，无明细行/类目/表单 ——
+{
+  const { page } = await openPage("/expenses");
+  const t = await innerText(page);
+  presentText("合伙人报销", t, ["按月汇总"]);
+  absentText("合伙人报销", t, ["差旅", "采购", "物流", "新建报销"]);
+  await page.close();
+}
+
+// —— 成员页（合伙人）：角色说明 + 中性只读说明，无邮箱/控件 ——
+{
+  const { page } = await openPage("/members");
+  const t = await innerText(page);
+  presentText("合伙人成员页", t, ["角色说明（三级）", "本页不展示成员明细"]);
+  absentRegex("合伙人成员页", t, [/[\w.+-]+@[\w-]+\.[\w.]+/]);
+  const boxes = await page.locator('input[type="checkbox"]').count();
+  rep.check("合伙人成员页 无授权控件", boxes === 0, `checkbox=${boxes}`);
+  await page.close();
+}
+
+// —— 状态页（合伙人）：抓取日志可见；工资对账行按 A3 裁定不渲染 ——
+{
+  const { page } = await openPage("/status");
+  const t = await innerText(page);
+  presentText("合伙人状态页", t, ["最近抓取 / 导入日志"]);
+  absentText("合伙人状态页", t, ["工资明细对账（实表 vs 月度汇总）"]);
   await page.close();
 }
 
