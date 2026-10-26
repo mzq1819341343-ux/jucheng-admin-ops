@@ -14,6 +14,8 @@
  * 另含：成员页店员整段不渲染（无「成员列表与业务授权」标题、无邮箱、无授权控件）；
  * 状态页工资对账行与抓取日志整节不渲染；
  * 成本/净利构成直进被拦回（URL 带 denied=，且目标页标志串不渲染）。
+ * 指令60 A2：/status 扩为三角色渲染轨（对账卡三角色在位、工资对账行仅
+ * 老板正例、抓取日志店员不渲染/合伙人与老板可见）。
  *
  * 用法：node scripts/regression/audit-staff.mjs（本地演示服务，staff 会话）
  */
@@ -128,11 +130,16 @@ function absentForbidden(name, text) {
 }
 
 // —— 状态页（店员=工资对账行整行不渲染、抓取日志整节不渲染，指令58 A3 裁定） ——
+// 指令60 A2 扩围：/status 三角色渲染轨——「10 月对账」卡为状态展示卡（非敏感
+// 数据），三角色都在位；工资对账行仅老板渲染、抓取日志节店员不渲染（合伙人
+// 可见日志、不可见对账行），三轨对照固化，防后续改动悄悄改渲染范围。
 {
   const { page, resp } = await openPage("/status");
   rep.check("状态页 HTTP 200", !!resp && resp.status() === 200);
   const t = await innerText(page);
   absentText("状态页", t, ["工资明细对账（实表 vs 月度汇总）", "最近抓取 / 导入日志", "请老板点"]);
+  rep.check("状态页 店员 10 月对账卡在位", t.includes("10 月对账"));
+  rep.check("状态页 店员 对账卡状态标在位", t.includes("need_user_login"));
   absentForbidden("状态页", t);
   await page.close();
 }
@@ -213,8 +220,25 @@ function presentText(name, text, list) {
 {
   const { page } = await openPage("/status");
   const t = await innerText(page);
-  presentText("合伙人状态页", t, ["最近抓取 / 导入日志"]);
+  presentText("合伙人状态页", t, ["最近抓取 / 导入日志", "10 月对账"]);
   absentText("合伙人状态页", t, ["工资明细对账（实表 vs 月度汇总）"]);
+  await page.close();
+}
+
+// ============================================================
+// 老板轨（指令60 A2）：/status 三角色渲染固化的老板侧——对账卡在位、
+// 工资对账行仅老板渲染（本轨为正例）、抓取日志节可见。
+// ============================================================
+await ctx.close();
+ctx = await demoContext(browser, { role: "owner", viewport: { width: 1440, height: 1000 } });
+
+{
+  const { page, resp } = await openPage("/status");
+  rep.check("老板 状态页 HTTP 200", !!resp && resp.status() === 200);
+  const t = await innerText(page);
+  for (const s of ["10 月对账", "工资明细对账（实表 vs 月度汇总）", "最近抓取 / 导入日志"]) {
+    rep.check(`老板状态页 老板可见「${s}」`, t.includes(s));
+  }
   await page.close();
 }
 

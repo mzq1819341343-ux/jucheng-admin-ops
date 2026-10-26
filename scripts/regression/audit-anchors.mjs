@@ -8,6 +8,7 @@
  * 负号在不同组件有 ASCII「-」与「−」两种渲染，断言用 [-−] 兼容。
  * 工资页演示模式不渲染实表明细（指令47），该页只断结构锚（配置区/双版本预览），
  * 工资数字锚点在总览年回报脚注、仪表盘与报表页断言。
+ * 指令60 A2：新增成员页老板轨（待邀请名单区结构 + 演示意向三行）。
  *
  * 用法：node scripts/regression/audit-anchors.mjs（本地演示服务，老板会话）
  */
@@ -130,6 +131,24 @@ function hasRe(name, text, re) {
   has("复盘三分支", t, "82.6%");
   await page.close();
   await ctx2.close();
+}
+
+// —— 成员页（老板轨，指令60 A2）：待邀请名单区结构在位 + 演示意向三行渲染 ——
+// 名单对店员/合伙人整节不渲染的 absent 断言在 audit-staff；本轨只固化老板侧
+// 结构与演示三行（lib/data.ts FALLBACK_MEMBER_INVITES），防结构漂移。
+// 注意：演示三行 ≠ 真机已生效——migration_008 未执行前真实模式走降级提示。
+{
+  const { page, resp } = await openPage("/members");
+  rep.check("成员页 HTTP 200", !!resp && resp.status() === 200);
+  const t = await innerText(page);
+  has("成员页", t, "待邀请名单");
+  has("成员页", t, "登记意向");
+  has("成员页", t, "staff-demo@example.com");
+  has("成员页", t, "partner-demo@example.com");
+  has("成员页", t, "aligned-demo@example.com");
+  has("成员页", t, "一键对齐"); // 仅已注册匹配行（显示名即邮箱）出现
+  has("成员页", t, "已对齐"); // aligned 示例行状态标
+  await page.close();
 }
 
 await browser.close();
