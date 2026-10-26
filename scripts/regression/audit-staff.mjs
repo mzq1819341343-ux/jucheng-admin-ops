@@ -77,7 +77,7 @@ function absentForbidden(name, text) {
   const t = await innerText(page);
   const labels = await exactLabels(page);
   absentLabels("报表", labels, ["工资成本", "工资占分润比", "人均分润", "净利暂定（元）", "净利暂定·扣成本后（元）", "2026-09 净利暂定（元）", "扣成本前净利暂定"]);
-  absentText("报表", t, ["单店净利暂定 =", "净利暂定未扣房租水电", "净利暂定仅最新月为完整口径", "目标达成复盘", "导出复盘 CSV"]);
+  absentText("报表", t, ["单店净利暂定 =", "净利暂定未扣房租水电", "净利暂定仅最新月为完整口径", "目标达成复盘", "导出复盘 CSV", "导出复盘 Excel"]);
   absentRegex("报表", t, [/[-−]809\.45/, /[-−]5,503\.06/, /3,290\.59/, /1,580\.27/, /6,312\.51/]);
   absentForbidden("报表", t);
   await page.close();
