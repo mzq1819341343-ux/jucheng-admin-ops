@@ -118,7 +118,7 @@ function absentForbidden(name, text) {
   const t = await innerText(page);
   const labels = await exactLabels(page);
   rep.check("成员页 店员无「成员列表与业务授权」标题", !labels.includes("成员列表与业务授权"));
-  absentText("成员页", t, ["成员列表与业务授权仅老板", "成员管理为只读"]);
+  absentText("成员页", t, ["成员列表与业务授权仅老板", "成员管理为只读", "待邀请名单"]);
   absentRegex("成员页", t, [/[\w.+-]+@[\w-]+\.[\w.]+/]);
   const boxes = await page.locator('input[type="checkbox"]').count();
   rep.check("成员页 店员无授权控件", boxes === 0, `checkbox=${boxes}`);
@@ -202,6 +202,7 @@ function presentText(name, text, list) {
   const { page } = await openPage("/members");
   const t = await innerText(page);
   presentText("合伙人成员页", t, ["角色说明（三级）", "本页不展示成员明细"]);
+  absentText("合伙人成员页", t, ["待邀请名单"]);
   absentRegex("合伙人成员页", t, [/[\w.+-]+@[\w-]+\.[\w.]+/]);
   const boxes = await page.locator('input[type="checkbox"]').count();
   rep.check("合伙人成员页 无授权控件", boxes === 0, `checkbox=${boxes}`);
