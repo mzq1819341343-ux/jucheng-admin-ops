@@ -46,7 +46,7 @@ const go = (page, path) => page.goto(BASE + path, { waitUntil: "networkidle", ti
 
 await shot("overview.png", async (page) => {
   await go(page, "/");
-  await page.waitForTimeout(900); // 等英雄区 CountUp 落定
+  await page.waitForTimeout(900); // 等英雄区入场落定（数字已静态直出，指令70 T-A5 后无 CountUp）
   await page.screenshot({ path: join(OUT, "overview.png") });
 });
 await shot("expenses.png", async (page) => {

@@ -21,7 +21,7 @@ const ctx = await demoContext(browser, { role: "owner", viewport: { width: 1440,
 async function openPage(path) {
   const page = await ctx.newPage();
   const resp = await page.goto(BASE + path, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
-  await page.waitForTimeout(600); // 等总览英雄 CountUp 落定
+  await page.waitForTimeout(600); // 等总览英雄区入场落定（数字已静态直出，指令70 T-A5 后无 CountUp）
   return { page, resp };
 }
 function has(name, text, s) {
