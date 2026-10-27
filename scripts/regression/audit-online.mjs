@@ -6,7 +6,8 @@
  * 1) /login 返回 200 且页面中「演示」出现 0 次（生产零演示入口）；
  * 2) 未登录访问六条登录后路径全部 307 → /login；
  * 3) 伪造 demo Cookie（demo_role=owner）访问仍 307（生产演示不可进）；
- * 4) /help-shots 八张图全部 200 且 content-type 为 image/png；
+ * 4) /help-shots 八张图全部 200 且 content-type 为 image/png，并逐图体积
+ *    守线（指令62 A2：≤ 61-A5 采纳基线 ×1.3）；
  * 5) /help 图注日期（指令58 A2）：生产 /help 未登录 307 读不到正文，图注随同一次
  *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
  *    存在、格式正确且为同一日；本地服务不可达时 info 跳过（全跑时必跑）。
@@ -43,11 +44,26 @@ for (const p of ["/", "/salary"]) {
   rep.check(`伪造 demo Cookie ${p} → 307`, r.status === 307, `status=${r.status}`);
 }
 
-// 4) help-shots 八图 200
-for (const f of ["overview.png", "expenses.png", "salary-rule-preview.png", "costs-utilities.png", "dashboard-drill.png", "compare.png", "mobile-overview.png", "mobile-expenses.png"]) {
+// 4) help-shots 八图 200 + 体积守线（指令62 A2）
+// 守线基线 = 指令61 A5 采纳量化后体积（2026-10-27 实测 public/help-shots，
+// 与生产逐字节一致），上限 = ceil(基线 × 1.3)；防 shots 刷新忘量化导致
+// 体积回涨无人察觉。基线变更只在「重新量化采纳」时随图一起改并注明轮次。
+const SHOT_SIZE_CAPS = {
+  "overview.png": 126990, // 基线 97,684（61-A5）
+  "expenses.png": 123893, // 基线 95,302（61-A5）
+  "salary-rule-preview.png": 22919, // 基线 17,630（61-A5）
+  "costs-utilities.png": 32512, // 基线 25,009（61-A5）
+  "dashboard-drill.png": 56591, // 基线 43,531（61-A5）
+  "compare.png": 113384, // 基线 87,218（61-A5）
+  "mobile-overview.png": 194417, // 基线 149,551（60-A3）
+  "mobile-expenses.png": 200307, // 基线 154,082（60-A3）
+};
+for (const [f, cap] of Object.entries(SHOT_SIZE_CAPS)) {
   const r = await get(`/help-shots/${f}`);
   const ct = r.headers.get("content-type") || "";
   rep.check(`help-shots/${f} 200 png`, r.status === 200 && ct.includes("image/png"), `status=${r.status} ct=${ct}`);
+  const bytes = r.status === 200 ? (await r.arrayBuffer()).byteLength : 0;
+  rep.check(`help-shots/${f} 体积守线 ≤${cap}B`, bytes > 0 && bytes <= cap, `bytes=${bytes} cap=${cap}`);
 }
 
 // 5) /help 图注日期存在且格式正确（指令58 A2；对本地演示构建的同一 /help 断言）
