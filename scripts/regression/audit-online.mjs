@@ -14,12 +14,14 @@
  *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
  *    存在、格式正确且为同一日；指令64 A2 增「与运行当日（Asia/Shanghai）
  *    一致」兜底断言（shots 已自动对齐当日，防图注过期混过）；本地服务
- *    不可达时 info 跳过（全跑时必跑）。
+ *    不可达时 info 跳过（全跑时必跑）；
+ * 7) 三处同数（指令64 A6）：/help 引用图数 = SHOT_SIZE_BASE 条目数 =
+ *    public/help-shots 实物文件数，防加图/删图漏同步任一侧。
  *
  * 用法：node scripts/regression/audit-online.mjs（REG_ONLINE 可覆盖目标）
  */
 import { Reporter, ONLINE, BASE } from "./lib.mjs";
-import { statSync } from "node:fs";
+import { statSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -154,6 +156,42 @@ try {
   for (const p of ["/", "/business/aihuishou/reports"]) {
     const r = await get(p, { cookie: `demo_role=owner; demo_biz=all; demo_targets=${inj}` });
     rep.check(`伪造 demo_targets 注入 ${p} → 307`, r.status === 307, `status=${r.status}`);
+  }
+}
+
+// 7) 三处同数（指令64 A6）：/help 引用图数 = SHOT_SIZE_BASE 条目数 = 实物文件数。
+// 加图/删图须三处同步（页面引用、守线基线、实物文件），任一侧漏改即 FAIL。
+{
+  const shotsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
+  const baseCount = Object.keys(SHOT_SIZE_BASE).length;
+  let files = null;
+  try {
+    files = readdirSync(shotsDir).filter((f) => f.endsWith(".png"));
+  } catch {
+    files = null;
+  }
+  if (files === null) {
+    rep.info("三处同数：public/help-shots 不可读，实物侧跳过（脱离仓库运行时）");
+  } else {
+    rep.check(
+      "三处同数：SHOT_SIZE_BASE 条目数 = help-shots 实物文件数",
+      baseCount === files.length,
+      `基线=${baseCount} 实物=${files.length}（${files.join(",")}）`
+    );
+  }
+  try {
+    const r = await fetch(BASE + "/help", { headers: { cookie: "demo_role=owner; demo_biz=all" } });
+    if (r.status !== 200) throw new Error(`status=${r.status}`);
+    const html = await r.text();
+    const bodyHtml = html.replace(/<script[\s\S]*?<\/script>/g, "");
+    const refs = new Set([...bodyHtml.matchAll(/help-shots\/([\w.-]+\.png)/g)].map((m) => m[1]));
+    rep.check(
+      "三处同数：/help 引用图数 = SHOT_SIZE_BASE 条目数",
+      refs.size === baseCount,
+      `引用=${refs.size} 基线=${baseCount}（${[...refs].join(",")}）`
+    );
+  } catch (e) {
+    rep.info(`本地演示服务不可达，三处同数页面侧跳过（全跑时必跑）：${e.message}`);
   }
 }
 
