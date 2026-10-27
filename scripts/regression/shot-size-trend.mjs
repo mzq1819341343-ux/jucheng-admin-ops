@@ -1,5 +1,6 @@
 /**
- * 守线偏差趋势自动留痕（指令66 A2，65-A5 手工表脚本化）：
+ * 守线偏差趋势自动留痕（指令66 A2 建，65-A5 手工表脚本化；指令67 A2
+ * 续跑，ROUND_POINTS 已增至 66 收尾点）：
  * 只读脚本——从 git 历史逐轮收尾点取 help-shots 八图实物字节，生成偏差
  * 趋势表，与 docs/运维_性能基线.md 中 65-A5 已记值逐值比对；偏差距容差
  * 沿 ≤1.5pt（逼近区）时在输出末尾显式提示。
@@ -34,6 +35,7 @@ const ROUND_POINTS = [
   { round: 63, commit: "df6d5bb" },
   { round: 64, commit: "99e792f" },
   { round: 65, commit: "17c4919" },
+  { round: 66, commit: "cb768d4" },
 ];
 const TOL_LOW = -20; // %
 const TOL_HIGH = 5; // %
@@ -103,7 +105,7 @@ for (const line of tableLines.slice(2)) {
 // —— 生成趋势表 ——
 const rounds = ROUND_POINTS.map((p) => p.round);
 const latest = rounds[rounds.length - 1];
-console.log(`# 守线偏差趋势（脚本生成，指令66 A2）\n`);
+console.log(`# 守线偏差趋势（脚本生成，指令66 A2 建 / 指令67 A2 续跑至 66 收尾点）\n`);
 console.log(
   `| 图 | 采纳基线 | ${rounds.map((r) => `${r} 收尾`).join(" | ")} | 现行偏差（${latest} 收尾） | 判定 |`
 );
