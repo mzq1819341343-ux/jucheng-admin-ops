@@ -41,12 +41,18 @@ export async function launchBrowser() {
   const executablePath = resolveChromium();
   return chromium.launch({
     ...(executablePath ? { executablePath } : {}),
-    args: ["--no-sandbox"],
+    // --no-zygote：T2 于指令67 轮转正（67 轮 SIGTRAP 再现，触发
+    // 2026-10-27 10:13 裁定的自动转正条款；本文件为全回归唯一启动
+    // 点，shots/perf/各 audit 均经此）。回退条件：连续两轮多进程
+    // 直起（不带此参数）正常且全量回归绿，则撤下并在当轮验收记录。
+    args: ["--no-sandbox", "--no-zygote"],
   });
 }
 
-/** 演示会话 context：demo_role / demo_biz Cookie（仅本地演示构建有效，生产恒 307）。 */
-export async function demoContext(browser, { role = "owner", biz = "all", viewport, mobile = false } = {}) {
+/** 演示会话 context：demo_role / demo_biz Cookie（仅本地演示构建有效，生产恒 307）。
+ * theme 可选：经 addInitScript 在页面脚本运行前预置 localStorage
+ * `jucheng-theme`（应用的预绘制恢复脚本据此设 data-theme），供主题双轨审计。 */
+export async function demoContext(browser, { role = "owner", biz = "all", viewport, mobile = false, theme } = {}) {
   const ctx = await browser.newContext({
     viewport,
     ...(mobile ? { deviceScaleFactor: 2, isMobile: true, hasTouch: true } : {}),
@@ -55,6 +61,13 @@ export async function demoContext(browser, { role = "owner", biz = "all", viewpo
     { name: "demo_role", value: role, url: BASE },
     { name: "demo_biz", value: biz, url: BASE },
   ]);
+  if (theme) {
+    await ctx.addInitScript((t) => {
+      try {
+        localStorage.setItem("jucheng-theme", t);
+      } catch (e) {}
+    }, theme);
+  }
   return ctx;
 }
 

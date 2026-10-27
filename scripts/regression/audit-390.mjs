@@ -1,9 +1,15 @@
 /**
- * 布局审计（指令57 A8 固化，指令58 A6 双视口，指令59 A3 扩为三角色）。
+ * 布局审计（指令57 A8 固化，指令58 A6 双视口，指令59 A3 扩为三角色，
+ * 指令67 A3 增日间主题轨）。
  *
  * 角色 × 视口：老板 / 合伙人 / 店员三演示会话 × 390×844 + 1440×1000。
  * 页集按各角色可达页裁剪：老板、合伙人六页（总览/报销/工资/成本/对比/help）；
  * 店员五页（成本页店员直进被拦回，不在布局页集内，拦截由 audit-staff 断言）。
+ *
+ * 主题双轨：夜间轨 = 三角色全量（现状，默认主题）；日间轨 = 老板会话先行
+ * （同页集 × 双视口），主题经 localStorage 预置 `jucheng-theme=light` 在
+ * 页面脚本前注入，另逐页断言 data-theme=light 实际生效；布局判定与夜间
+ * 轨同标准复用。
  *
  * 判定标准（两视口同标准）：
  * 1) 页面级横向溢出为 0：documentElement.scrollWidth <= 视口宽；
@@ -37,19 +43,27 @@ const VIEWPORTS = [
   { label: "1440", viewport: { width: 1440, height: 1000 }, mobile: false },
 ];
 
+// 主题双轨：夜间 = 三角色全量；日间 = 老板会话先行（指令67 A3）
+const TRACKS = [
+  { themeLabel: "夜间", theme: undefined, roles: ROLE_PAGES },
+  { themeLabel: "日间", theme: "light", roles: [ROLE_PAGES[0]] },
+];
+
 const rep = new Reporter("audit-390");
 const browser = await launchBrowser();
 
+for (const track of TRACKS) {
 for (const vp of VIEWPORTS) {
-  for (const [roleLabel, role, pages] of ROLE_PAGES) {
+  for (const [roleLabel, role, pages] of track.roles) {
     const ctx = await demoContext(browser, {
       role,
       viewport: vp.viewport,
       mobile: vp.mobile,
+      theme: track.theme,
     });
 
     for (const [name, path] of pages) {
-      const tag = `${vp.label} ${roleLabel} ${name}`;
+      const tag = `${vp.label} ${track.themeLabel} ${roleLabel} ${name}`;
       const page = await ctx.newPage();
       const resp = await page.goto(BASE + path, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
       await page.waitForTimeout(500);
@@ -97,8 +111,11 @@ for (const vp of VIEWPORTS) {
           }
           if (smallTargets.length >= 6) break;
         }
-        return { iw, docSW, wide, squeezed, smallTargets };
+        return { iw, docSW, wide, squeezed, smallTargets, themeAttr: document.documentElement.getAttribute("data-theme") };
       });
+      if (track.theme) {
+        rep.check(`${tag} 日间主题生效（data-theme=light）`, r.themeAttr === "light", `data-theme=${r.themeAttr}`);
+      }
       rep.check(`${tag} 页面级横向溢出=0`, r.docSW <= r.iw, `docSW=${r.docSW} iw=${r.iw}`);
       rep.check(`${tag} 文本撞线=0`, r.squeezed.length === 0, JSON.stringify(r.squeezed.slice(0, 3)));
       const outside = r.wide.filter((w) => !w.inTableWrap);
@@ -113,6 +130,7 @@ for (const vp of VIEWPORTS) {
     }
     await ctx.close();
   }
+}
 }
 
 await browser.close();
