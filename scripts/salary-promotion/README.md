@@ -60,3 +60,20 @@ node scripts/salary-promotion/dry-run.mjs --input scripts/salary-promotion/sampl
 
 零写入自检在本轮复跑仍无命中（grep 口径见上节）；原 sample-data.json 未动，
 59 轮预期（5 行 / 3 人 → 晋升 2 行）复跑不变。
+
+## 报告留痕校验（指令63 A6）
+
+三份样本的期望关键行固化在同目录 `expected.json`（汇总行 + 全部晋升行 +
+未匹配/重名/口径提示行，逐字；不含随运行目录变的「输入文件」行）。只读
+校验命令一键跑全部样本逐行比对：
+
+```bash
+npm run salary:verify   # 或 node scripts/salary-promotion/verify-expectations.mjs
+```
+
+全对位输出逐样本 PASS（现行期望行数：boundary 12 / data 8 / empty 4），
+任一行缺失即 FAIL 并列出缺行——样本或 dry-run 口径后续被改动时在此
+现形，须人工确认变动无误后同步更新 `expected.json`，不得为过校验反改
+样本。校验脚本同为零写入（只 spawn dry-run 读其标准输出）。变异验证
+（63 轮已做）：改 sample-data 一处 net_amount 3400.5 → 3401.5，校验
+精确 FAIL 缺失受影响的晋升行，还原后全 PASS（误改未入仓）。
