@@ -217,11 +217,15 @@ function presentText(name, text, list) {
 }
 
 // —— 状态页（合伙人）：抓取日志可见；工资对账行按 A3 裁定不渲染 ——
+// 指令74 A4：演示模式不进真实空态——兜底日志行仍渲染、空态文案不出现
+// （真实模式 !fromDb && !demo 的空态分支由 audit-status 源码断言守）。
 {
   const { page } = await openPage("/status");
   const t = await innerText(page);
   presentText("合伙人状态页", t, ["最近抓取 / 导入日志", "10 月对账"]);
   absentText("合伙人状态页", t, ["工资明细对账（实表 vs 月度汇总）"]);
+  rep.check("合伙人状态页 演示兜底日志行在位「aihuishou_cockpit_v3_3」", t.includes("aihuishou_cockpit_v3_3"));
+  rep.check("合伙人状态页 演示不渲染真实空态「暂无抓取记录（管道已备未启用）」", !t.includes("暂无抓取记录（管道已备未启用）"));
   await page.close();
 }
 
@@ -239,6 +243,9 @@ ctx = await demoContext(browser, { role: "owner", viewport: { width: 1440, heigh
   for (const s of ["10 月对账", "工资明细对账（实表 vs 月度汇总）", "最近抓取 / 导入日志"]) {
     rep.check(`老板状态页 老板可见「${s}」`, t.includes(s));
   }
+  // 指令74 A4：演示模式不误伤——兜底两行仍渲染、真实空态文案不出现。
+  rep.check("老板状态页 演示兜底日志行在位「aihuishou_auto_fetch」", t.includes("aihuishou_auto_fetch"));
+  rep.check("老板状态页 演示不渲染真实空态「暂无抓取记录（管道已备未启用）」", !t.includes("暂无抓取记录（管道已备未启用）"));
   await page.close();
 }
 

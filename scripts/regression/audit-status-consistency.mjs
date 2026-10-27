@@ -6,6 +6,8 @@
  * 比对方式：字段 = 一组关键 token，要求 token 在该侧全文中全部出现
  * （页面取老板演示会话渲染文本，运行单读仓库文件原文）。
  * 启用步骤数单独按 DOM 数：状态卡「一键启用步骤」必须恰好 4 步。
+ * 指令74 A4 追加：真实模式空态分支（!fromDb && !demo）的源码机理
+ * 静态守卫 + 演示渲染不误伤反证（见文件末段 A4 断言）。
  *
  * 用法：node scripts/regression/audit-status-consistency.mjs（本地演示服务）
  */
@@ -16,6 +18,7 @@ import { launchBrowser, demoContext, Reporter, innerText, BASE } from "./lib.mjs
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runbook = readFileSync(join(here, "..", "..", "docs", "fetch-pipeline", "10月抓取运行单.md"), "utf8");
+const statusSrc = readFileSync(join(here, "..", "..", "app", "status", "page.tsx"), "utf8");
 
 // [字段名, status 侧 tokens, 运行单侧 tokens]
 const FIELDS = [
@@ -47,6 +50,17 @@ for (const [field, statusTokens, runbookTokens] of FIELDS) {
   const missR = runbookTokens.filter((t) => !runbook.includes(t));
   rep.check(`字段「${field}」运行单在位`, missR.length === 0, missR.length ? `缺：${missR.join(" / ")}` : "");
 }
+
+// —— 指令74 A4 裁定（修·方向①）断言 ——
+// 真实模式空态分支无法用演示会话触发（演示恒走兜底、生产未登录恒 307），
+// 故对源码机理做静态守卫，并以演示渲染反证不误伤演示轨：
+// 源码必须消费 fromDb、以 !fromDb && !user.demo 为空态条件、含空态文案；
+// 演示渲染必须仍见兜底日志行且不见空态文案。
+rep.check("A4 源码记录节消费 fromDb（解构 getFetchLogs）", statusSrc.includes("const { logs, fromDb } = await getFetchLogs()"));
+rep.check("A4 源码空态条件「!fromDb && !user.demo」在位", statusSrc.includes("!fromDb && !user.demo"));
+rep.check("A4 源码空态文案「暂无抓取记录（管道已备未启用）」在位", statusSrc.includes("暂无抓取记录（管道已备未启用）"));
+rep.check("A4 演示渲染兜底日志行在位「aihuishou_cockpit_v3_3」", statusText.includes("aihuishou_cockpit_v3_3"));
+rep.check("A4 演示渲染不出现真实空态文案", !statusText.includes("暂无抓取记录（管道已备未启用）"));
 
 const stepCount = await page.evaluate(() => {
   const heads = [...document.querySelectorAll("h2.section-title")];
