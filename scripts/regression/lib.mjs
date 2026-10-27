@@ -41,11 +41,7 @@ export async function launchBrowser() {
   const executablePath = resolveChromium();
   return chromium.launch({
     ...(executablePath ? { executablePath } : {}),
-    // --no-zygote：T2 于指令67 轮转正（67 轮 SIGTRAP 再现，触发
-    // 2026-10-27 10:13 裁定的自动转正条款；本文件为全回归唯一启动
-    // 点，shots/perf/各 audit 均经此）。回退条件：连续两轮多进程
-    // 直起（不带此参数）正常且全量回归绿，则撤下并在当轮验收记录。
-    args: ["--no-sandbox", "--no-zygote"],
+    args: ["--no-sandbox"],
   });
 }
 
