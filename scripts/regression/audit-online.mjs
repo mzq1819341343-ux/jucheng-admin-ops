@@ -62,7 +62,7 @@ const SHOT_SIZE_BASE = {
   "overview.png": 97684, // 61-A5
   "expenses.png": 95302, // 61-A5
   "salary-rule-preview.png": 17630, // 61-A5
-  "costs-utilities.png": 25009, // 61-A5
+  "costs-utilities.png": 37695, // 71-A7：随 71-A4 电费区界面变化（未录月份点选行+说明增补）重拍采纳
   "dashboard-drill.png": 43531, // 61-A5
   "compare.png": 87218, // 61-A5
   "mobile-overview.png": 149551, // 60-A3
@@ -72,7 +72,7 @@ const SHOT_SIZE_CAPS = {
   "overview.png": 126990,
   "expenses.png": 123893,
   "salary-rule-preview.png": 22919,
-  "costs-utilities.png": 32512,
+  "costs-utilities.png": 49004,
   "dashboard-drill.png": 56591,
   "compare.png": 113384,
   "mobile-overview.png": 194417,
