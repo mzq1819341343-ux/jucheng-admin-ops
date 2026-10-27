@@ -12,7 +12,9 @@
  *    偏差须在容差内（实物已显著偏离 = 「基线过期」，须重定基线）；
  * 5) /help 图注日期（指令58 A2）：生产 /help 未登录 307 读不到正文，图注随同一次
  *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
- *    存在、格式正确且为同一日；本地服务不可达时 info 跳过（全跑时必跑）。
+ *    存在、格式正确且为同一日；指令64 A2 增「与运行当日（Asia/Shanghai）
+ *    一致」兜底断言（shots 已自动对齐当日，防图注过期混过）；本地服务
+ *    不可达时 info 跳过（全跑时必跑）。
  *
  * 用法：node scripts/regression/audit-online.mjs（REG_ONLINE 可覆盖目标）
  */
@@ -130,6 +132,14 @@ try {
     "/help 图注日期格式 YYYY-MM-DD 且八处同一日",
     dates.length === 8 && dates.every((d) => d === dates[0]),
     dates.join(",")
+  );
+  // 指令64 A2：图注须与运行当日（Asia/Shanghai）一致——同日断言防不住
+  // 「八处同为过期日期」整批混过，当日兜底把图注新鲜度钉在运行日。
+  const todayCST = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+  rep.check(
+    "/help 图注日期与运行当日（Asia/Shanghai）一致",
+    dates.length === 8 && dates.every((d) => d === todayCST),
+    `运行当日=${todayCST} 图注=${dates[0] ?? "无"}`
   );
 } catch (e) {
   rep.info(`本地演示服务不可达，图注日期断言跳过（全跑时必跑）：${e.message}`);
