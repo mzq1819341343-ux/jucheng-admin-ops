@@ -157,6 +157,20 @@ try {
     const r = await get(p, { cookie: `demo_role=owner; demo_biz=all; demo_targets=${inj}` });
     rep.check(`伪造 demo_targets 注入 ${p} → 307`, r.status === 307, `status=${r.status}`);
   }
+  // 指令66 A5 缺口补强：(i) /login 带伪造 demo Cookie 仍零演示入口
+  // （§1 原仅测无 Cookie 态）；(ii) demo_targets 单独出现（无 demo_role）
+  // 不得单独成事——targets 分支以 user.demo 为前提，角色闸门在前。
+  {
+    const r = await get("/login", { cookie: "demo_role=owner; demo_biz=all" });
+    const body = await r.text();
+    rep.check("伪造 demo Cookie /login HTTP 200", r.status === 200, `status=${r.status}`);
+    const n = body.split("演示").length - 1;
+    rep.check("伪造 demo Cookie /login 「演示」出现 0 次", n === 0, `count=${n}`);
+  }
+  {
+    const r = await get("/business/aihuishou/reports", { cookie: `demo_targets=${inj}` });
+    rep.check("仅 demo_targets（无 demo_role）/reports → 307", r.status === 307, `status=${r.status}`);
+  }
 }
 
 // 7) 三处同数（指令64 A6）：/help 引用图数 = SHOT_SIZE_BASE 条目数 = 实物文件数。
