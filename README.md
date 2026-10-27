@@ -96,5 +96,5 @@ lib/supabase/        浏览器/服务端客户端
 lib/data.ts          数据访问层（Supabase 优先，未配置时用与 seed 一致的兜底汇总）
 supabase/schema.sql  建表 + RLS + 视图
 supabase/seed.sql    v3.3 汇总种子数据
-middleware.ts        路由登录保护（已配置 Supabase 时生效）
+proxy.ts             路由登录保护（Next 16 约定，已配置 Supabase 时生效）
 ```
