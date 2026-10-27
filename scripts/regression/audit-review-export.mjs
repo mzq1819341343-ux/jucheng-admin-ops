@@ -1,9 +1,12 @@
 /**
- * 目标复盘导出一致性审计（指令61 A4，指令60 A4 一次性比对正规化）：
- * 老板演示会话（含 demo_targets 注入三分支）下打开报表页，抓「目标达成
- * 复盘」页面表格逐行，再真实点击两个导出按钮拿下载文件，CSV / Excel 与
- * 页面行同源逐格比对——证明页面与导出吃的是同一份 buildTargetReviewRows
- * 行数据、同一格式化口径（components/TargetReviewExport.tsx rowCells）。
+ * 目标复盘导出一致性审计（指令61 A4，指令60 A4 一次性比对正规化；
+ * 指令62 A3 扩合伙人轨）：老板与合伙人两个演示会话（含 demo_targets 注入
+ * 三分支）各跑一轨——打开报表页抓「目标达成复盘」页面表格逐行，再真实点击
+ * 两个导出按钮拿下载文件，CSV / Excel 与页面行同源逐格比对，并断言两轨
+ * 页面行完全一致（合伙人同为敏感角色，应同源同数）；店员 absent 由
+ * audit-staff 守，不在本脚本重复。证明页面与导出吃的是同一份
+ * buildTargetReviewRows 行数据、同一格式化口径
+ * （components/TargetReviewExport.tsx rowCells）。
  *
  * 格式差异（设计如此，比对时正规化）：页面金额带千分位与「 元」后缀、
  * 缺值显「—」；导出为纯数字（金额 2 位小数 / 单量整数）、缺值留空。
@@ -43,86 +46,101 @@ function normRow(cells, fromPage) {
 }
 const eqRow = (a, b) => a.length === b.length && a.every((v, i) => v === b[i] || (Number.isNaN(v) && Number.isNaN(b[i])));
 
+/** 单轨全流程：页面行 + CSV/Excel 逐格比对；返回页面正规化行供跨轨比对。 */
+async function runTrack(browser, role, label) {
+  const ctx = await demoContext(browser, { role, viewport: { width: 1440, height: 1000 } });
+  try {
+    await ctx.addCookies([
+      { name: "demo_targets", value: Buffer.from(JSON.stringify(targets), "utf8").toString("base64url"), url: BASE },
+    ]);
+    const page = await ctx.newPage();
+    const resp = await page.goto(REPORTS, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
+    rep.check(`${label}：复盘导出审计 HTTP 200`, !!resp && resp.status() === 200);
+    await page.waitForTimeout(400);
+
+    // —— 页面侧：定位复盘表（标题后第一张 report 表）并抓行 ——
+    const pageData = await page.evaluate(() => {
+      const h2s = [...document.querySelectorAll("h2.section-title")];
+      const h2 = h2s.find((h) => h.textContent.includes("目标达成复盘"));
+      if (!h2) return null;
+      let el = h2.nextElementSibling;
+      while (el && !el.querySelector("table.report")) el = el.nextElementSibling;
+      const table = el?.querySelector("table.report");
+      if (!table) return null;
+      const head = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+      const rows = [...table.querySelectorAll("tbody tr")].map((tr) =>
+        [...tr.querySelectorAll("td")].map((td) => td.textContent.trim())
+      );
+      return { head, rows };
+    });
+    rep.check(`${label}：复盘节与表格在位`, !!pageData);
+    const btnCsv = await page.getByRole("button", { name: "导出复盘 CSV" }).count();
+    const btnXls = await page.getByRole("button", { name: "导出复盘 Excel" }).count();
+    rep.check(`${label}：导出按钮在位（CSV + Excel）`, btnCsv === 1 && btnXls === 1, `csv=${btnCsv} xls=${btnXls}`);
+    const pageRows = (pageData?.rows ?? []).map((r) => normRow(r, true));
+    rep.check(`${label}：页面复盘行数 = 27（9 月 × 3 口径）`, pageRows.length === 27, `实得 ${pageRows.length}`);
+    rep.check(
+      `${label}：页面表头六列`,
+      JSON.stringify(pageData?.head) === JSON.stringify(["月份", "口径", "目标", "实际", "达成率", "状态"]),
+      JSON.stringify(pageData?.head)
+    );
+    const statuses = new Set(pageRows.map((r) => r[5]));
+    for (const s of ["已达成", "未达成", "待核算", "未设定"]) {
+      rep.check(`${label}：页面状态分支覆盖「${s}」`, statuses.has(s));
+    }
+
+    // —— CSV：真实点击下载，BOM/表头/逐行比对 ——
+    const [csvDl] = await Promise.all([
+      page.waitForEvent("download", { timeout: 15000 }),
+      page.getByRole("button", { name: "导出复盘 CSV" }).click(),
+    ]);
+    const csvBuf = readFileSync(await csvDl.path());
+    rep.check(`${label}：CSV 带 UTF-8 BOM`, csvBuf[0] === 0xef && csvBuf[1] === 0xbb && csvBuf[2] === 0xbf);
+    const csvLines = csvBuf.toString("utf8").replace(/^﻿/, "").split("\n").filter((l) => l.length > 0);
+    rep.check(`${label}：CSV 表头六列`, csvLines[0] === "月份,口径,目标,实际,达成率,状态", csvLines[0]);
+    const csvRows = csvLines.slice(1).map((l) => normRow(l.split(","), false));
+    rep.check(`${label}：CSV 行数与页面一致`, csvRows.length === pageRows.length, `csv=${csvRows.length} page=${pageRows.length}`);
+    pageRows.forEach((pr, i) => {
+      rep.check(`${label}：CSV 第 ${i + 1} 行与页面逐格一致（${pr[0]} ${pr[1]}）`, eqRow(csvRows[i] ?? [], pr),
+        `csv=${JSON.stringify(csvRows[i])} page=${JSON.stringify(pr)}`);
+    });
+
+    // —— Excel（.xls HTML 表）：真实点击下载，解析 tr/td 逐行比对 ——
+    const [xlsDl] = await Promise.all([
+      page.waitForEvent("download", { timeout: 15000 }),
+      page.getByRole("button", { name: "导出复盘 Excel" }).click(),
+    ]);
+    const xlsText = readFileSync(await xlsDl.path(), "utf8");
+    rep.check(`${label}：Excel 带 UTF-8 BOM`, xlsText.charCodeAt(0) === 0xfeff);
+    const dec = (s) =>
+      s.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&").trim();
+    const trs = [...xlsText.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
+    const xlsHead = trs.length ? [...trs[0].matchAll(/<th>([\s\S]*?)<\/th>/g)].map((m) => dec(m[1])) : [];
+    rep.check(`${label}：Excel 表头六列`, JSON.stringify(xlsHead) === JSON.stringify(["月份", "口径", "目标", "实际", "达成率", "状态"]),
+      JSON.stringify(xlsHead));
+    const xlsRows = trs.slice(1).map((tr) => normRow([...tr.matchAll(/<td>([\s\S]*?)<\/td>/g)].map((m) => dec(m[1])), false));
+    rep.check(`${label}：Excel 行数与页面一致`, xlsRows.length === pageRows.length, `xls=${xlsRows.length} page=${pageRows.length}`);
+    pageRows.forEach((pr, i) => {
+      rep.check(`${label}：Excel 第 ${i + 1} 行与页面逐格一致（${pr[0]} ${pr[1]}）`, eqRow(xlsRows[i] ?? [], pr),
+        `xls=${JSON.stringify(xlsRows[i])} page=${JSON.stringify(pr)}`);
+    });
+    rep.check(`${label}：CSV 与 Excel 行数据互相一致`, JSON.stringify(csvRows) === JSON.stringify(xlsRows));
+
+    return pageRows;
+  } finally {
+    await ctx.close();
+  }
+}
+
 const browser = await launchBrowser();
 try {
-  const ctx = await demoContext(browser, { role: "owner", viewport: { width: 1440, height: 1000 } });
-  await ctx.addCookies([
-    { name: "demo_targets", value: Buffer.from(JSON.stringify(targets), "utf8").toString("base64url"), url: BASE },
-  ]);
-  const page = await ctx.newPage();
-  const resp = await page.goto(REPORTS, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null);
-  rep.check("复盘导出审计 HTTP 200", !!resp && resp.status() === 200);
-  await page.waitForTimeout(400);
-
-  // —— 页面侧：定位复盘表（标题后第一张 report 表）并抓行 ——
-  const pageData = await page.evaluate(() => {
-    const h2s = [...document.querySelectorAll("h2.section-title")];
-    const h2 = h2s.find((h) => h.textContent.includes("目标达成复盘"));
-    if (!h2) return null;
-    let el = h2.nextElementSibling;
-    while (el && !el.querySelector("table.report")) el = el.nextElementSibling;
-    const table = el?.querySelector("table.report");
-    if (!table) return null;
-    const head = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
-    const rows = [...table.querySelectorAll("tbody tr")].map((tr) =>
-      [...tr.querySelectorAll("td")].map((td) => td.textContent.trim())
-    );
-    return { head, rows };
-  });
-  rep.check("复盘节与表格在位", !!pageData);
-  const btnCsv = await page.getByRole("button", { name: "导出复盘 CSV" }).count();
-  const btnXls = await page.getByRole("button", { name: "导出复盘 Excel" }).count();
-  rep.check("导出按钮在位（CSV + Excel）", btnCsv === 1 && btnXls === 1, `csv=${btnCsv} xls=${btnXls}`);
-  const pageRows = (pageData?.rows ?? []).map((r) => normRow(r, true));
-  rep.check("页面复盘行数 = 27（9 月 × 3 口径）", pageRows.length === 27, `实得 ${pageRows.length}`);
+  const ownerRows = await runTrack(browser, "owner", "老板轨");
+  const partnerRows = await runTrack(browser, "partner", "合伙人轨");
   rep.check(
-    "页面表头六列",
-    JSON.stringify(pageData?.head) === JSON.stringify(["月份", "口径", "目标", "实际", "达成率", "状态"]),
-    JSON.stringify(pageData?.head)
+    "跨轨同源：合伙人页面 27 行与老板逐格一致",
+    JSON.stringify(partnerRows) === JSON.stringify(ownerRows),
+    `partner=${partnerRows.length} owner=${ownerRows.length}`
   );
-  const statuses = new Set(pageRows.map((r) => r[5]));
-  for (const s of ["已达成", "未达成", "待核算", "未设定"]) {
-    rep.check(`页面状态分支覆盖「${s}」`, statuses.has(s));
-  }
-
-  // —— CSV：真实点击下载，BOM/表头/逐行比对 ——
-  const [csvDl] = await Promise.all([
-    page.waitForEvent("download", { timeout: 15000 }),
-    page.getByRole("button", { name: "导出复盘 CSV" }).click(),
-  ]);
-  const csvBuf = readFileSync(await csvDl.path());
-  rep.check("CSV 带 UTF-8 BOM", csvBuf[0] === 0xef && csvBuf[1] === 0xbb && csvBuf[2] === 0xbf);
-  const csvLines = csvBuf.toString("utf8").replace(/^﻿/, "").split("\n").filter((l) => l.length > 0);
-  rep.check("CSV 表头六列", csvLines[0] === "月份,口径,目标,实际,达成率,状态", csvLines[0]);
-  const csvRows = csvLines.slice(1).map((l) => normRow(l.split(","), false));
-  rep.check("CSV 行数与页面一致", csvRows.length === pageRows.length, `csv=${csvRows.length} page=${pageRows.length}`);
-  pageRows.forEach((pr, i) => {
-    rep.check(`CSV 第 ${i + 1} 行与页面逐格一致（${pr[0]} ${pr[1]}）`, eqRow(csvRows[i] ?? [], pr),
-      `csv=${JSON.stringify(csvRows[i])} page=${JSON.stringify(pr)}`);
-  });
-
-  // —— Excel（.xls HTML 表）：真实点击下载，解析 tr/td 逐行比对 ——
-  const [xlsDl] = await Promise.all([
-    page.waitForEvent("download", { timeout: 15000 }),
-    page.getByRole("button", { name: "导出复盘 Excel" }).click(),
-  ]);
-  const xlsText = readFileSync(await xlsDl.path(), "utf8");
-  rep.check("Excel 带 UTF-8 BOM", xlsText.charCodeAt(0) === 0xfeff);
-  const dec = (s) =>
-    s.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&").trim();
-  const trs = [...xlsText.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
-  const xlsHead = trs.length ? [...trs[0].matchAll(/<th>([\s\S]*?)<\/th>/g)].map((m) => dec(m[1])) : [];
-  rep.check("Excel 表头六列", JSON.stringify(xlsHead) === JSON.stringify(["月份", "口径", "目标", "实际", "达成率", "状态"]),
-    JSON.stringify(xlsHead));
-  const xlsRows = trs.slice(1).map((tr) => normRow([...tr.matchAll(/<td>([\s\S]*?)<\/td>/g)].map((m) => dec(m[1])), false));
-  rep.check("Excel 行数与页面一致", xlsRows.length === pageRows.length, `xls=${xlsRows.length} page=${pageRows.length}`);
-  pageRows.forEach((pr, i) => {
-    rep.check(`Excel 第 ${i + 1} 行与页面逐格一致（${pr[0]} ${pr[1]}）`, eqRow(xlsRows[i] ?? [], pr),
-      `xls=${JSON.stringify(xlsRows[i])} page=${JSON.stringify(pr)}`);
-  });
-  rep.check("CSV 与 Excel 行数据互相一致", JSON.stringify(csvRows) === JSON.stringify(xlsRows));
-
-  await ctx.close();
 } finally {
   await browser.close();
 }
