@@ -7,7 +7,9 @@
  * 2) 未登录访问六条登录后路径全部 307 → /login；
  * 3) 伪造 demo Cookie（demo_role=owner）访问仍 307（生产演示不可进）；
  * 4) /help-shots 八张图全部 200 且 content-type 为 image/png，并逐图体积
- *    守线（指令62 A2：≤ 61-A5 采纳基线 ×1.3）；
+ *    守线（指令62 A2：≤ 61-A5 采纳基线 ×1.3）；指令63 A2 增基线防漂移
+ *    自检：上限须恒 = ceil(采纳基线 ×1.3)，且仓内实物体积与采纳基线
+ *    偏差须在容差内（实物已显著偏离 = 「基线过期」，须重定基线）；
  * 5) /help 图注日期（指令58 A2）：生产 /help 未登录 307 读不到正文，图注随同一次
  *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
  *    存在、格式正确且为同一日；本地服务不可达时 info 跳过（全跑时必跑）。
@@ -15,6 +17,9 @@
  * 用法：node scripts/regression/audit-online.mjs（REG_ONLINE 可覆盖目标）
  */
 import { Reporter, ONLINE, BASE } from "./lib.mjs";
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const rep = new Reporter("audit-online");
 
@@ -48,15 +53,26 @@ for (const p of ["/", "/salary"]) {
 // 守线基线 = 指令61 A5 采纳量化后体积（2026-10-27 实测 public/help-shots，
 // 与生产逐字节一致），上限 = ceil(基线 × 1.3)；防 shots 刷新忘量化导致
 // 体积回涨无人察觉。基线变更只在「重新量化采纳」时随图一起改并注明轮次。
+// 采纳基线独立成表（指令63 A2），与上限表互为自检对象，改一处即被下节抓出。
+const SHOT_SIZE_BASE = {
+  "overview.png": 97684, // 61-A5
+  "expenses.png": 95302, // 61-A5
+  "salary-rule-preview.png": 17630, // 61-A5
+  "costs-utilities.png": 25009, // 61-A5
+  "dashboard-drill.png": 43531, // 61-A5
+  "compare.png": 87218, // 61-A5
+  "mobile-overview.png": 149551, // 60-A3
+  "mobile-expenses.png": 154082, // 60-A3
+};
 const SHOT_SIZE_CAPS = {
-  "overview.png": 126990, // 基线 97,684（61-A5）
-  "expenses.png": 123893, // 基线 95,302（61-A5）
-  "salary-rule-preview.png": 22919, // 基线 17,630（61-A5）
-  "costs-utilities.png": 32512, // 基线 25,009（61-A5）
-  "dashboard-drill.png": 56591, // 基线 43,531（61-A5）
-  "compare.png": 113384, // 基线 87,218（61-A5）
-  "mobile-overview.png": 194417, // 基线 149,551（60-A3）
-  "mobile-expenses.png": 200307, // 基线 154,082（60-A3）
+  "overview.png": 126990,
+  "expenses.png": 123893,
+  "salary-rule-preview.png": 22919,
+  "costs-utilities.png": 32512,
+  "dashboard-drill.png": 56591,
+  "compare.png": 113384,
+  "mobile-overview.png": 194417,
+  "mobile-expenses.png": 200307,
 };
 for (const [f, cap] of Object.entries(SHOT_SIZE_CAPS)) {
   const r = await get(`/help-shots/${f}`);
@@ -64,6 +80,41 @@ for (const [f, cap] of Object.entries(SHOT_SIZE_CAPS)) {
   rep.check(`help-shots/${f} 200 png`, r.status === 200 && ct.includes("image/png"), `status=${r.status} ct=${ct}`);
   const bytes = r.status === 200 ? (await r.arrayBuffer()).byteLength : 0;
   rep.check(`help-shots/${f} 体积守线 ≤${cap}B`, bytes > 0 && bytes <= cap, `bytes=${bytes} cap=${cap}`);
+}
+
+// 4b) 守线基线防漂移自检（指令63 A2）：
+// (i) 上限恒须 = ceil(采纳基线 × 1.3)——上限或基线任一被手改即 FAIL；
+// (ii) 仓内实物体积（public/help-shots，本地可读时）与采纳基线偏差须在
+//      容差 [+5%, −20%] 内（容差吸收日期驱动的内容翻转，如超期徽标增减）；
+//      实物显著偏离基线 = 「基线过期」FAIL，提示按新采纳体积重定基线。
+//      本地文件不可读（如脱离仓库运行）时该项 info 跳过，(i) 恒跑。
+{
+  const shotsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
+  for (const [f, base] of Object.entries(SHOT_SIZE_BASE)) {
+    const cap = SHOT_SIZE_CAPS[f];
+    const expect = Math.ceil(base * 1.3);
+    rep.check(
+      `守线自检 ${f}：上限 = ceil(基线×1.3)`,
+      cap === expect,
+      `基线过期或常量被改：cap=${cap} 基线=${base} 应为上限=${expect}`
+    );
+    let actual = null;
+    try {
+      actual = statSync(join(shotsDir, f)).size;
+    } catch {
+      actual = null;
+    }
+    if (actual === null) {
+      rep.info(`守线自检 ${f}：仓内实物不可读，实物对位跳过`);
+      continue;
+    }
+    const inTol = actual <= Math.ceil(base * 1.05) && actual >= Math.floor(base * 0.8);
+    rep.check(
+      `守线自检 ${f}：实物 ${actual}B 与采纳基线偏差在容差内`,
+      inTol,
+      `基线过期：实物=${actual}B 基线=${base}B（容差 +5%/−20%），请按新采纳体积重定 SHOT_SIZE_BASE 与 SHOT_SIZE_CAPS`
+    );
+  }
 }
 
 // 5) /help 图注日期存在且格式正确（指令58 A2；对本地演示构建的同一 /help 断言）
