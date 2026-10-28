@@ -1,0 +1,153 @@
+[
+ {
+  "input_file": "browser-download-20261025T170301.542827715Z-0-download",
+  "format": "statement_detail",
+  "fields": [
+   {
+    "name": "首次出库日期",
+    "type": "date",
+    "non_empty": 413
+   },
+   {
+    "name": "回收成交日期",
+    "type": "date",
+    "non_empty": 413
+   },
+   {
+    "name": "回收小订单号",
+    "type": "integer",
+    "non_empty": 413
+   },
+   {
+    "name": "商户ID",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "商户负责人",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "所属商户",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "交付方类型",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "门店名称",
+    "type": "string",
+    "non_empty": 262
+   },
+   {
+    "name": "门店标签",
+    "type": "string",
+    "non_empty": 262
+   },
+   {
+    "name": "开店日期",
+    "type": "date",
+    "non_empty": 262
+   },
+   {
+    "name": "是否新开店",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "物权所属",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "交易方式",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "结算渠道",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "回收类型",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "是否保值回收",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "来源类型",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "质检一级品类",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "是否运营中心免检",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "大额优惠券超出部分金额",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "成交订单金额",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "是否门店订单",
+    "type": "string",
+    "non_empty": 413
+   },
+   {
+    "name": "结算金额",
+    "type": "decimal",
+    "non_empty": 133
+   },
+   {
+    "name": "平台服务费",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "质检服务费",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "加盟订单抽成金额",
+    "type": "string",
+    "non_empty": 0
+   },
+   {
+    "name": "加盟订单抽成调整金额",
+    "type": "string",
+    "non_empty": 0
+   },
+   {
+    "name": "毛利额",
+    "type": "decimal",
+    "non_empty": 413
+   },
+   {
+    "name": "分润金额",
+    "type": "decimal",
+    "non_empty": 413
+   }
+  ]
+ }
+]

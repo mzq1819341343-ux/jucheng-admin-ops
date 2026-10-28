@@ -1,0 +1,38 @@
+{
+ "source": "爱回收官网后台",
+ "fetched_at": "2026-10-28T16:22:45+08:00",
+ "timezone": "Asia/Shanghai",
+ "pipeline": "jucheng-admin/docs/fetch-pipeline/auto_fetch.py（指令186）",
+ "state": "draft",
+ "upload": false,
+ "apply": false,
+ "redacted": true,
+ "stores": {
+  "石河子万达店": "4594",
+  "石河子友谊商厦店": "5511"
+ },
+ "rows_total": 413,
+ "rows_sampled": 200,
+ "per_store_rows": {
+  "": 151,
+  "石河子万达店": 262
+ },
+ "has_order_count": true,
+ "has_profit": true,
+ "inputs": [
+  {
+   "input_file": "browser-download-20261025T170301.542827715Z-0-download",
+   "input_sha256": "90372ec2f3f34d79aa03d670d6beef7f5e955108e124ac17bbdb11674ed11f5f",
+   "input_bytes": 64722,
+   "format": "statement_detail",
+   "sheet": "首次出库订单结算明细",
+   "rows_total": 413
+  }
+ ],
+ "outputs": [
+  "normalized_sample.csv",
+  "fields.json",
+  "manifest.json",
+  "status.json"
+ ]
+}

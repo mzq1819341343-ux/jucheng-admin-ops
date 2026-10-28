@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  爱回收驾驶舱 · 本地提醒型定时任务示例（launchd，未启用）
+  爱回收官网抓数 · 本地提醒型定时任务示例（launchd，未启用）
+
+  【2026-10-28 口径更正（指令186）】权威源＝爱回收官网 / 加盟商后台；
+  拍机堂已取消、不做备用。暂缓上传：UPLOAD / APPLY=false，本任务即使
+  将来启用也只跑管道自检（auto_fetch.py --check），不抓生产数、不上传。
+  启用前须老板点头，本轮不启用。
 
   定位：本地脚本无法复用 Muse 浏览器的登录会话，因此本任务只做
-  “到点提醒 + 运行抓取骨架检查”，真正的后台导出仍需用户本人在
-  已登录的浏览器中完成。本文件不含任何账号密码。
+  “到点提醒 + 运行管道自检”，真正的官网后台导出仍需在已登录的
+  浏览器会话中完成，导出后由 auto_fetch.py --once 规范化落盘。
+  本文件不含任何账号密码。
 
   安装位置：~/Library/LaunchAgents/com.aihuishou.cockpit.plist
   启用命令：
@@ -16,7 +22,7 @@
 
   使用前必须改：命令中的 GOAL 改成本机项目根目录的绝对路径。
   时区：StartCalendarInterval 按本机系统时区解释，本机应为 Asia/Shanghai。
-  计划：每月 3 日 10:00 运行一次，自动取上个月（date -v-1m 为 macOS 语法）。
+  计划：每月 3 日 10:00 运行一次管道自检（--check），仅提醒与自检，不取数。
 -->
 <plist version="1.0">
 <dict>
@@ -26,7 +32,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>/usr/bin/python3 GOAL/muse_v3/auto_fetch/auto_fetch.py --month "$(date -v-1m +%Y-%m)"</string>
+		<string>/usr/bin/python3 GOAL/docs/fetch-pipeline/auto_fetch.py --check</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>

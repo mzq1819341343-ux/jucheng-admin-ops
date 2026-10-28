@@ -1,20 +1,22 @@
-# 爱回收驾驶舱 · crontab 示例（未启用）
+# 爱回收官网抓数 · crontab 示例（全注释态，未启用）
 #
-# 两种用法二选一，不要与 launchd 示例同时启用，避免重复跑：
-# A) Muse 定时任务（推荐）：在 Muse 里建 cron 任务唤起 agent，
-#    在已登录的 Muse 浏览器中只读导出 + 跑 v3，时区 Asia/Shanghai；
-#    这种方式不需要下面的 crontab，本文件仅作本地备选说明。
-# B) 用户 Mac 本地 crontab：只能做提醒与（文件已备好时的）重算，
-#    本地脚本无法复用 Muse 浏览器会话，导出仍需用户本人完成登录后操作。
 #
-# 安装（方式 B）：把 GOAL 改成本机项目根目录绝对路径后执行
-#   crontab -e   （粘贴下面两行）
-# 停用：crontab -e 删除对应行即可。
-# 时区：cron 按本机系统时区运行，本机应为 Asia/Shanghai。
-# 注意：macOS 上 date 取上月用 `date -v-1m +%Y-%m`；Linux 用 `date -d last-month +%Y-%m`。
-
-# 每日 09:30：检查前一日增量（骨架；会话不可用时立即停并写状态，不重试登录）
-30 9 * * * /usr/bin/python3 GOAL/muse_v3/auto_fetch/auto_fetch.py --date "$(date -v-1d +%Y-%m-%d)" >> GOAL/muse_v3/auto_fetch/status/cron.log 2>&1
-
-# 每月 3 日 10:00：抓上月整月（订单 + 对账单 + 列表金额）
-0 10 3 * * /usr/bin/python3 GOAL/muse_v3/auto_fetch/auto_fetch.py --month "$(date -v-1m +%Y-%m)" >> GOAL/muse_v3/auto_fetch/status/cron.log 2>&1
+# - 权威源＝爱回收官网 / 加盟商后台；拍机堂已取消、不做备用（老板定案）。
+# - 暂缓上传：UPLOAD / APPLY=false；调度即使将来启用，也只做
+# 「导出文件规范化落盘」，绝不 merge 生产业务表、不重算覆盖正式页。
+# - 本文件全部条目为注释态：启用前必须经老板点头，并按《待启用配置.md》
+# 动作清单逐项登记；本轮（指令186）不启用任何定时任务。
+#
+# 说明：浏览器登录官网后台并原生导出，须在已登录会话中完成（主线会话执行）；
+# 本地 crontab 只能对已导出的文件跑规范化（auto_fetch.py --once），
+# 无法代替登录与导出动作。下列两行仅为将来启用时的形态示例，保持注释：
+#
+# 每日 09:30（Asia/Shanghai）：规范化当日已导出文件（示例，注释态）
+# 30 9 * * * /usr/bin/python3 REPO/docs/fetch-pipeline/auto_fetch.py --once --input EXPORT_DIR >> SAMPLE_DIR/cron.log 2>&1
+#
+# 每月 3 日 10:00：规范化上月整月导出（示例，注释态）
+# 0 10 3 * * /usr/bin/python3 REPO/docs/fetch-pipeline/auto_fetch.py --once --input EXPORT_DIR >> SAMPLE_DIR/cron.log 2>&1
+#
+# REPO＝jucheng-admin 仓路径；EXPORT_DIR＝官网后台导出落盘目录；
+# SAMPLE_DIR 见 pipeline_config.json 的 SAMPLE_DIR。
+# 停用方式：保持注释即为停用；已安装的条目删除对应行即可。
