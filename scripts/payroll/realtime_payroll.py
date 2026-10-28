@@ -15,9 +15,21 @@ EFFECTIVE_FROM 对应 salary_rules.effective_from：老板 2026-10-28 拍板 = 2
   python3 scripts/payroll/realtime_payroll.py \
     --input ~/Desktop/05_Muse督工/fetch_samples_191/native_export_2026-10_oldMachineOrder.xlsx \
     --month 2026-10 --out-dir ~/Desktop/05_Muse督工/payroll_192/
+  # 指令193 在职名单过滤（老板 2026-10-28 20:05 拍板：只算在职，张浩冉与
+  # 已离职者不计薪，其订单进排除清单）：
+  python3 scripts/payroll/realtime_payroll.py \
+    --input ~/Desktop/05_Muse督工/fetch_samples_191/native_export_2026-10_oldMachineOrder.xlsx \
+    --month 2026-10 \
+    --active-roster ~/Desktop/05_Muse督工/payroll_193/active_roster_2026-10.json \
+    --out-dir ~/Desktop/05_Muse督工/payroll_193/
+  不带 --active-roster 时计算口径与 192 一致（不过滤），但硬断言仍然生效：
+  只要计薪结果含张浩冉/张静怡/杨燕辉/吕文飞任一人即报错中止（退出码 3）——
+  193 之后不带名单的「全员应发草案」不再可出，防误用。
 
 输出（个人级，仅落 --out-dir 指定目录，禁止入仓/外传）：
   payroll_<month>.json / payroll_<month>.csv
+  带 --active-roster 时另出 excluded_roster.json（被排除人员姓名/单量/金额/原因），
+  并在 payroll JSON 的 meta.active_roster 与 totals 中同步汇总。
 stdout 只打印汇总锚点（总单量/分店单量/人数/各项合计），不打印个人清单。
 
 计算口径与假设（与 docs/工资字段映射_192.md 一致，假设均标【假设·待老板确认】）：
@@ -64,6 +76,9 @@ ACCESSORIES_TIERS = [(Decimal("10000"), Decimal("0.40")),
 DOOR_PROFIT_PCT = Decimal("0.50")     # 上门提成 = 卖出利润（分润）× 50%
 
 STORE_IDS = {"石河子万达店": "4594", "石河子友谊商厦店": "5511"}  # batch001 验收对应口径
+
+# 指令193 老板拍板硬排除（断言用）：这四人绝不允许出现在计薪 people 中
+HARD_EXCLUDED = ("张浩冉", "张静怡", "杨燕辉", "吕文飞")
 
 CENT = Decimal("0.01")
 
@@ -113,6 +128,10 @@ def main(argv=None):
                     help="数据来源标注（写入草案 meta）")
     ap.add_argument("--base-exceptions", default=None,
                     help="可选：个人底薪例外 JSON {姓名: 底薪}，本轮未提供 = 全员默认")
+    ap.add_argument("--active-roster", default=None,
+                    help="可选（指令193）：在职名单 JSON {active:[姓名], excluded:[{person, reason}]}；"
+                         "非名单人员不计薪，订单汇入 excluded 输出；缺省 = 不过滤（计算口径同 192，"
+                         "但计薪含硬排除四人时断言中止）")
     args = ap.parse_args(argv)
 
     if args.month and args.month < EFFECTIVE_FROM:
@@ -142,6 +161,15 @@ def main(argv=None):
         exceptions = {k: Decimal(str(v)) for k, v in
                       json.loads(Path(args.base_exceptions).read_text(encoding="utf-8")).items()}
 
+    # 指令193：在职名单（计薪白名单 + 排除原因表）；缺省不过滤
+    active_set = None
+    roster_reasons = {}
+    if args.active_roster:
+        roster = json.loads(Path(args.active_roster).read_text(encoding="utf-8"))
+        active_set = set(roster.get("active", []))
+        roster_reasons = {e["person"]: e.get("reason", "不在在职名单")
+                          for e in roster.get("excluded", [])}
+
     # 门店基数合计 → 定档（默认基数 + 分润对照基数）
     store_base = defaultdict(Decimal)
     store_profit_base = defaultdict(Decimal)
@@ -158,6 +186,30 @@ def main(argv=None):
     store_rate = {s: tier_rate(store_base[s]) for s in store_count}
     store_rate_ref = {s: tier_rate(store_profit_base[s]) for s in store_count}
 
+    # 指令193：被排除人员订单单独聚合（不计薪，仅留痕进排除清单）
+    excluded_agg = {}
+    if active_set is not None:
+        tmp = defaultdict(lambda: {"orders": 0, "base_amt": Decimal("0"),
+                                   "profit": Decimal("0")})
+        for r in in_month:
+            person = g(r, "门店验货人")
+            if person in active_set:
+                continue
+            e = tmp[person]
+            e["orders"] += 1
+            v0 = num(r, STORE_BASE_FIELD)
+            if v0 is not None:
+                e["base_amt"] += v0
+            p0 = num(r, "分润金额")
+            if p0 is not None:
+                e["profit"] += p0
+        excluded_agg = {p: {"person": p,
+                            "orders": tmp[p]["orders"],
+                            "base_amt_excl_coupon": float(money(tmp[p]["base_amt"])),
+                            "profit_total": float(money(tmp[p]["profit"])),
+                            "reason": roster_reasons.get(p, "不在在职名单")}
+                        for p in sorted(tmp, key=lambda x: -tmp[x]["orders"])}
+
     # 按人聚合（门店拆分单列，供门店提成按店档位率计算）
     agg = defaultdict(lambda: {
         "orders": 0, "base_amt": Decimal("0"), "base_amt_missing": 0,
@@ -168,6 +220,8 @@ def main(argv=None):
     })
     for r in in_month:
         person, store = g(r, "门店验货人"), g(r, "门店名称")
+        if active_set is not None and person not in active_set:
+            continue  # 指令193：非在职名单不计薪（已在 excluded_agg 留痕）
         a = agg[person]
         a["orders"] += 1
         a["stores"][store]["orders"] += 1
@@ -233,8 +287,15 @@ def main(argv=None):
         people.append(row)
 
     total_orders = sum(p["orders"] for p in people)
-    assert total_orders == len(in_month), \
-        "单量锚点不符：个人合计 %d != 月内行数 %d" % (total_orders, len(in_month))
+    excluded_orders = sum(e["orders"] for e in excluded_agg.values())
+    assert total_orders + excluded_orders == len(in_month), \
+        "单量锚点不符：计薪 %d + 排除 %d != 月内行数 %d" % (total_orders, excluded_orders, len(in_month))
+    # 指令193 硬断言：老板点名四人绝不允许进计薪（出现即报错退出，不出草案）
+    leaked = [p["person"] for p in people if p["person"] in HARD_EXCLUDED]
+    if leaked:
+        print("错误（指令193）：计薪名单中出现硬排除人员 %s，已中止" % "、".join(leaked),
+              file=sys.stderr)
+        return 3
 
     meta = {
         "draft": True,
@@ -274,12 +335,37 @@ def main(argv=None):
         "accessories_commission_total": 0.0,
         "gross_total": float(money(sum(Decimal(str(p["gross"])) for p in people))),
     }
+    if active_set is not None:
+        meta["assumptions"].append(
+            "在职名单过滤（指令193·老板拍板）：仅在职名单人员计薪，张浩冉与已离职者不计薪、"
+            "其订单进排除清单；门店定档基数仍按当月全量订单（口径未改），本月两店按全量与"
+            "仅计薪口径档位均为 4%，过滤不改档位率")
+        meta["active_roster"] = {
+            "file": str(Path(args.active_roster).resolve()),
+            "active": sorted(active_set),
+            "excluded": list(excluded_agg.values()),
+            "excluded_people": len(excluded_agg),
+            "excluded_orders": excluded_orders,
+        }
+        totals["excluded_people"] = len(excluded_agg)
+        totals["excluded_orders"] = excluded_orders
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {"meta": meta, "totals": totals, "people": people}
     (out_dir / ("payroll_%s.json" % month)).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if active_set is not None:
+        (out_dir / "excluded_roster.json").write_text(
+            json.dumps({"month": month,
+                        "rule": "指令193 老板拍板：只算在职名单，张浩冉与已离职者不计薪",
+                        "active": sorted(active_set),
+                        "excluded": list(excluded_agg.values()),
+                        "excluded_people": len(excluded_agg),
+                        "excluded_orders": excluded_orders,
+                        "paid_orders": total_orders,
+                        "rows_in_month": len(in_month)},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
     with open(out_dir / ("payroll_%s.csv" % month), "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["月份", "验货人", "单量", "底薪", "基础", "全勤", "拉新",
@@ -297,7 +383,11 @@ def main(argv=None):
                         p["profit_missing_rows"], p["base_amt_missing_rows"]])
 
     print("输入 %d 行 → 月份 %s 内 %d 行（月外 %d 行）" % (len(rows), month, len(in_month), out_month))
-    print("单量锚点 PASS：每人单量合计 %d == 月内行数 %d" % (total_orders, len(in_month)))
+    if active_set is not None:
+        print("单量锚点 PASS：计薪单量 %d + 排除单量 %d == 月内行数 %d"
+              % (total_orders, excluded_orders, len(in_month)))
+    else:
+        print("单量锚点 PASS：每人单量合计 %d == 月内行数 %d" % (total_orders, len(in_month)))
     for s in sorted(store_count):
         print("  %s(%s)：%d 单，基数(不含券) %s → 档位 %.0f%%（分润基数对照 %s → %.0f%%）"
               % (s, STORE_IDS.get(s, ""), store_count[s], money(store_base[s]),
@@ -307,6 +397,12 @@ def main(argv=None):
              totals["door_commission_total"], totals["online_commission_total"],
              totals["store_commission_total"]))
     print("个人级输出（仅本机）：%s / .csv" % (out_dir / ("payroll_%s.json" % month)))
+    if active_set is not None:
+        print("在职名单过滤（指令193）：计薪人数 %d / 排除人数 %d / 排除单量 %d"
+              "（计薪单量 %d + 排除单量 %d == 月内 %d）"
+              % (totals["people"], len(excluded_agg), excluded_orders,
+                 total_orders, excluded_orders, len(in_month)))
+        print("排除清单（仅本机）：%s" % (out_dir / "excluded_roster.json"))
     return 0
 
 
