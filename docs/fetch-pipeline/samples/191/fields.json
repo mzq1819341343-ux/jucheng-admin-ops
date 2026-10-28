@@ -1,0 +1,193 @@
+[
+ {
+  "input_file": "native_export_2026-10_oldMachineOrder.xlsx",
+  "format": "orders37",
+  "fields": [
+   {
+    "name": "物品编号",
+    "type": "integer",
+    "non_empty": 458
+   },
+   {
+    "name": "快递单号",
+    "type": "integer",
+    "non_empty": 458
+   },
+   {
+    "name": "品类",
+    "type": "string",
+    "non_empty": 0
+   },
+   {
+    "name": "型号",
+    "type": "string",
+    "non_empty": 0
+   },
+   {
+    "name": "SKU",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "出库品类",
+    "type": "string",
+    "non_empty": 442
+   },
+   {
+    "name": "出库型号",
+    "type": "string",
+    "non_empty": 442
+   },
+   {
+    "name": "出库SKU",
+    "type": "string",
+    "non_empty": 442
+   },
+   {
+    "name": "门店等级",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "最新等级",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "取货方式",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "交付方类型",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "门店名称",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "是否门店订单",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "订单金额",
+    "type": "decimal",
+    "non_empty": 172
+   },
+   {
+    "name": "订单金额（不含券）",
+    "type": "decimal",
+    "non_empty": 286
+   },
+   {
+    "name": "结算金额",
+    "type": "decimal",
+    "non_empty": 170
+   },
+   {
+    "name": "物品成本价",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "回收优惠金额",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "协商议价扣除",
+    "type": "decimal",
+    "non_empty": 272
+   },
+   {
+    "name": "建议议价金额",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "最大议价金额",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "实际议价金额",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "平台服务费",
+    "type": "decimal",
+    "non_empty": 170
+   },
+   {
+    "name": "质检服务费",
+    "type": "decimal",
+    "non_empty": 28
+   },
+   {
+    "name": "抽成比例",
+    "type": "decimal",
+    "non_empty": 458
+   },
+   {
+    "name": "抽成金额",
+    "type": "string",
+    "non_empty": 0
+   },
+   {
+    "name": "分润金额",
+    "type": "decimal",
+    "non_empty": 442
+   },
+   {
+    "name": "订单状态",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "门店验货人",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "物权状态",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "物权所属",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "创建时间",
+    "type": "date",
+    "non_empty": 458
+   },
+   {
+    "name": "完成时间",
+    "type": "date",
+    "non_empty": 458
+   },
+   {
+    "name": "来源类型",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "回收类型",
+    "type": "string",
+    "non_empty": 458
+   },
+   {
+    "name": "交易方式",
+    "type": "string",
+    "non_empty": 458
+   }
+  ]
+ }
+]

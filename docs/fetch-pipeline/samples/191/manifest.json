@@ -1,0 +1,38 @@
+{
+ "source": "爱回收官网后台",
+ "fetched_at": "2026-10-28T19:36:47+08:00",
+ "timezone": "Asia/Shanghai",
+ "pipeline": "jucheng-admin/docs/fetch-pipeline/auto_fetch.py（指令186）",
+ "state": "draft",
+ "upload": false,
+ "apply": false,
+ "redacted": true,
+ "stores": {
+  "石河子万达店": "4594",
+  "石河子友谊商厦店": "5511"
+ },
+ "rows_total": 458,
+ "rows_sampled": 200,
+ "per_store_rows": {
+  "石河子万达店": 242,
+  "石河子友谊商厦店": 216
+ },
+ "has_order_count": true,
+ "has_profit": true,
+ "inputs": [
+  {
+   "input_file": "native_export_2026-10_oldMachineOrder.xlsx",
+   "input_sha256": "5b3040142cdf2a23269ba9eeafd96d17aefee05b6a284335ca797bd8bdf0012b",
+   "input_bytes": 99066,
+   "format": "orders37",
+   "sheet": "旧机销售订单明细",
+   "rows_total": 458
+  }
+ ],
+ "outputs": [
+  "normalized_sample.csv",
+  "fields.json",
+  "manifest.json",
+  "status.json"
+ ]
+}
