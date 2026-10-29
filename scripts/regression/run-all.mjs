@@ -6,7 +6,8 @@
  * 服务（REG_BASE），第六项打线上。
  *
  * 前置（详见 docs/运维_回归清单.md）：
- *   NEXT_PUBLIC_ALLOW_DEMO=1 npm run build && PORT=3100 npm run start
+ *   在 jucheng-admin-web：NEXT_PUBLIC_ALLOW_DEMO=1 npm run build && PORT=3100 npm run start
+ *   在本仓：REG_WEB_ROOT=<前端检出> REG_BASE=http://localhost:3100 npm run regression
  * 用法：node scripts/regression/run-all.mjs
  */
 import { spawnSync } from "node:child_process";
@@ -22,7 +23,8 @@ try {
   if (r.status !== 200) throw new Error(`status=${r.status}`);
 } catch (e) {
   console.error(`本地演示服务不可达（${BASE}）：${e.message}`);
-  console.error("请先启动：NEXT_PUBLIC_ALLOW_DEMO=1 npm run build && PORT=3100 npm run start");
+  console.error("请先在 jucheng-admin-web 启动：NEXT_PUBLIC_ALLOW_DEMO=1 npm run build && PORT=3100 npm run start");
+  console.error("本仓另需 REG_WEB_ROOT（前端检出）与 REG_BASE（默认 http://localhost:3100）。");
   process.exit(2);
 }
 

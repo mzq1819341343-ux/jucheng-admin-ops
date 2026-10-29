@@ -19,7 +19,7 @@
 supabase/                 schema.sql、seed.sql、migration_002 … migration_010
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
 scripts/payroll/          实时工资草案（不连库）
-scripts/regression/       前端回归（需原单体仓里的 Next 应用）
+scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 ```
 
@@ -53,10 +53,31 @@ python3 scripts/payroll/realtime_payroll.py \
 
 ## 运维清单
 
-- 回归：`docs/运维_回归清单.md`（脚本在 `scripts/regression/`）
+- 回归：`docs/运维_回归清单.md`（脚本在本仓 `scripts/regression/`）
 - 性能基线：`docs/运维_性能基线.md`
 
-回归要在含有 Next 应用的目录里先启动演示构建（`NEXT_PUBLIC_ALLOW_DEMO=1 npm run build`，再 `PORT=3100 npm run start`）。这些 npm 脚本在前端仓已经卸下，原单体仓仍可按清单执行。
+回归分两仓。脚本与 `npm run regression` 在本仓；Next 应用在 [jucheng-admin-web](https://github.com/mzq1819341343-ux/jucheng-admin-web)。先在前端仓启动演示构建，再回到本仓设定 `REG_WEB_ROOT`（前端检出，必填）与 `REG_BASE`（正在跑的服务）。线上未登录侧用 `REG_ONLINE`。
+
+```bash
+# 前端仓：演示构建并监听 :3100（生产 Vercel 构建不要带 ALLOW_DEMO）
+cd /path/to/jucheng-admin-web
+npm install
+NEXT_PUBLIC_ALLOW_DEMO=1 npm run build
+PORT=3100 npm run start
+
+# 本仓
+cd /path/to/jucheng-admin-ops
+npm install
+export REG_WEB_ROOT=/path/to/jucheng-admin-web   # 绝对路径，或相对当前目录
+export REG_BASE=http://localhost:3100
+npm run regression
+
+# 只打线上（HTTP 目标默认 https://jcxj.cc；实物图仍读 REG_WEB_ROOT/public/help-shots）
+export REG_ONLINE=https://jcxj.cc
+npm run regression:online
+```
+
+`npm run shots` 把八张图写进 `$REG_WEB_ROOT/public/help-shots`，并改 `$REG_WEB_ROOT/app/help/page.tsx` 的图注日期。这些产物属于前端仓，要在 jucheng-admin-web 另开 PR，不要提交进本仓。未设置或空白的 `REG_WEB_ROOT` 会直接非 0 退出。
 
 工资晋升样本校验不连库，在本仓即可跑：
 

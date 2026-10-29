@@ -1,0 +1,20 @@
+{
+  "name": "jucheng-admin-ops",
+  "private": true,
+  "version": "0.1.0",
+  "description": "聚成运维与校准。回归脚本在本仓；前端 app/public/lib 在 jucheng-admin-web，经 REG_WEB_ROOT 访问。",
+  "scripts": {
+    "regression": "node scripts/regression/run-all.mjs",
+    "regression:online": "node scripts/regression/audit-online.mjs",
+    "regression:390": "node scripts/regression/audit-390.mjs",
+    "regression:staff": "node scripts/regression/audit-staff.mjs",
+    "regression:anchors": "node scripts/regression/audit-anchors.mjs",
+    "regression:status": "node scripts/regression/audit-status-consistency.mjs",
+    "regression:review": "node scripts/regression/audit-review-export.mjs",
+    "shots": "node scripts/regression/capture-help-shots.mjs",
+    "salary:verify": "node scripts/salary-promotion/verify-expectations.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}

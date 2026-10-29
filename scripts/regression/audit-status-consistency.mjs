@@ -14,11 +14,21 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launchBrowser, demoContext, Reporter, innerText, BASE } from "./lib.mjs";
+import { launchBrowser, demoContext, Reporter, innerText, BASE, webPath } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// 运行单留在本仓 docs/；状态页源码在前端仓。
 const runbook = readFileSync(join(here, "..", "..", "docs", "fetch-pipeline", "10月抓取运行单.md"), "utf8");
-const statusSrc = readFileSync(join(here, "..", "..", "app", "status", "page.tsx"), "utf8");
+const statusPath = webPath("app", "status", "page.tsx");
+let statusSrc;
+try {
+  statusSrc = readFileSync(statusPath, "utf8");
+} catch (e) {
+  console.error(
+    `错误：无法读取前端状态页 ${statusPath}。REG_WEB_ROOT 须指向含 app/status/page.tsx 的 jucheng-admin-web 检出。${e.message}`
+  );
+  process.exit(2);
+}
 
 // [字段名, status 侧 tokens, 运行单侧 tokens]
 const FIELDS = [
