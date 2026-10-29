@@ -7,12 +7,19 @@
  * 沿 ≤1.5pt（逼近区）时在输出末尾显式提示。
  *
  * 纪律：只提示、不改基线、不改图；本脚本不纳入 run-all 断言（比对不一致
- * 仍以退出码 0 结束，由当轮验收人工裁处）。git 读不到前端仓里的历史
- * 提交时退出码 1（软分库改写了 ROUND_POINTS 的单体仓 SHA）。
+ * 仍以退出码 0 结束，由当轮验收人工裁处）。git 在前端仓读不到给出的
+ * 提交或 public/help-shots 路径时退出码 1。
  * 采纳基线单源 = audit-online.mjs 的 SHOT_SIZE_BASE（正则解析，不复制
  * 常量）；容差沿与 audit-online 4b 一致：[−20%, +5%]。
  *
- * 用法：node scripts/regression/shot-size-trend.mjs
+ * ROUND_POINTS.commit 是 jucheng-admin-web 的提交。软分库前单体仓
+ * jucheng-admin 的「指令NN收尾」只改 docs/，滤进前端仓时被丢掉，旧
+ * SHA（d525887 等）在 web 历史里不存在。每一轮取该收尾时刻之前、
+ * 前端仓里最后一笔提交；八图字节与 65-A5 表一致，66 的
+ * mobile-overview 为 147,622B。63/64/65 之间没有新的前端提交，共用
+ * 30dff0107f19，其 public/help-shots 树与 62 的 3e217a2718da 相同。
+ *
+ * 用法：REG_WEB_ROOT=<jucheng-admin-web 检出> node scripts/regression/shot-size-trend.mjs
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -32,14 +39,20 @@ const FILES = [
   "mobile-overview.png",
   "mobile-expenses.png",
 ];
-// 逐轮收尾点（commit subject 应含「指令NN收尾」，脚本自检并提示）
+// 前端仓提交（12 位，在 jucheng-admin-web 上唯一）。mark 是该提交
+// subject 的自检片段：收尾笔本身不在前端历史里，不能再要求「指令NN收尾」。
+// 单体仓旧 SHA → 前端仓对应提交：
+//   61 d525887 → 9e5c27eaf223 指令61-A6（help-shots 树 fc2a51fd，与 61-A5 相同）
+//   62 5592255 → 3e217a2718da 指令62-A8（树 682b3166）
+//   63 df6d5bb / 64 99e792f / 65 17c4919 → 30dff0107f19 指令63-A6（树仍 682b3166）
+//   66 cb768d4 → 674cb40de765 指令66-A3（mobile-overview 换 147,622B，树 701f02c0）
 const ROUND_POINTS = [
-  { round: 61, commit: "d525887" },
-  { round: 62, commit: "5592255" },
-  { round: 63, commit: "df6d5bb" },
-  { round: 64, commit: "99e792f" },
-  { round: 65, commit: "17c4919" },
-  { round: 66, commit: "cb768d4" },
+  { round: 61, commit: "9e5c27eaf223", mark: "指令61-A6" },
+  { round: 62, commit: "3e217a2718da", mark: "指令62-A8" },
+  { round: 63, commit: "30dff0107f19", mark: "指令63-A6" },
+  { round: 64, commit: "30dff0107f19", mark: "指令63-A6" },
+  { round: 65, commit: "30dff0107f19", mark: "指令63-A6" },
+  { round: 66, commit: "674cb40de765", mark: "指令66-A3" },
 ];
 const TOL_LOW = -20; // %
 const TOL_HIGH = 5; // %
@@ -70,7 +83,7 @@ function gitInWeb(args) {
   } catch (e) {
     const detail = (e.stderr || e.message || "").toString().trim();
     console.error(
-      `错误：在 REG_WEB_ROOT（${WEB_ROOT}）执行 git ${args.join(" ")} 失败。help-shots 历史只在 jucheng-admin-web 里；软分库改写了提交号，ROUND_POINTS 若仍是单体仓 SHA，需换成该仓对应提交后再跑。${detail}`
+      `错误：在 REG_WEB_ROOT（${WEB_ROOT}）执行 git ${args.join(" ")} 失败。help-shots 历史只在 jucheng-admin-web 里，ROUND_POINTS 必须是该仓已有提交。${detail}`
     );
     process.exit(1);
   }
@@ -85,9 +98,9 @@ function gitSubject(commit) {
 }
 const sizes = {}; // sizes[file][round] = bytes
 const subjectWarn = [];
-for (const { round, commit } of ROUND_POINTS) {
+for (const { round, commit, mark } of ROUND_POINTS) {
   const subj = gitSubject(commit);
-  if (!subj.includes(`指令${round}收尾`)) subjectWarn.push(`收尾点 ${commit} subject 未含「指令${round}收尾」：${subj}`);
+  if (!subj.includes(mark)) subjectWarn.push(`收尾点 ${commit}（指令${round}）subject 未含「${mark}」：${subj}`);
   for (const f of FILES) {
     (sizes[f] ||= {})[round] = gitSize(commit, f);
   }
