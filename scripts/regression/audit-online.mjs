@@ -63,7 +63,7 @@ const SHOT_SIZE_BASE = {
   "expenses.png": 95302, // 61-A5
   "salary-rule-preview.png": 17630, // 61-A5
   "costs-utilities.png": 37695, // 71-A7：随 71-A4 电费区界面变化（未录月份点选行+说明增补）重拍采纳
-  "dashboard-drill.png": 43531, // 61-A5
+  "dashboard-drill.png": 31218, // 171 收尾：打码去真数后重新量化采纳（2026-10-29）
   "compare.png": 87218, // 61-A5
   "mobile-overview.png": 149551, // 60-A3
   "mobile-expenses.png": 154082, // 60-A3
@@ -73,7 +73,7 @@ const SHOT_SIZE_CAPS = {
   "expenses.png": 123893,
   "salary-rule-preview.png": 22919,
   "costs-utilities.png": 49004,
-  "dashboard-drill.png": 56591,
+  "dashboard-drill.png": 40584, // = ceil(31218×1.3)
   "compare.png": 113384,
   "mobile-overview.png": 194417,
   "mobile-expenses.png": 200307,
