@@ -8,22 +8,24 @@
  * 3) 伪造 demo Cookie（demo_role=owner）访问仍 307（生产演示不可进）；
  * 4) /help-shots 八张图全部 200 且 content-type 为 image/png，并逐图体积
  *    守线（指令62 A2：≤ 61-A5 采纳基线 ×1.3）；指令63 A2 增基线防漂移
- *    自检：上限须恒 = ceil(采纳基线 ×1.3)，且仓内实物体积与采纳基线
- *    偏差须在容差内（实物已显著偏离 = 「基线过期」，须重定基线）；
+ *    自检：上限须恒 = ceil(采纳基线 ×1.3)，且 REG_WEB_ROOT/public/help-shots
+ *    实物体积与采纳基线偏差须在容差内（实物已显著偏离 = 「基线过期」，须重定基线）；
  * 5) /help 图注日期（指令58 A2）：生产 /help 未登录 307 读不到正文，图注随同一次
  *    构建发布，故对本地演示构建的同一 /help 断言八处「截图刷新：YYYY-MM-DD」
  *    存在、格式正确且为同一日；指令64 A2 增「与运行当日（Asia/Shanghai）
  *    一致」兜底断言（shots 已自动对齐当日，防图注过期混过）；本地服务
  *    不可达时 info 跳过（全跑时必跑）；
  * 7) 三处同数（指令64 A6）：/help 引用图数 = SHOT_SIZE_BASE 条目数 =
- *    public/help-shots 实物文件数，防加图/删图漏同步任一侧。
+ *    REG_WEB_ROOT/public/help-shots 实物文件数，防加图/删图漏同步任一侧。
  *
  * 用法：node scripts/regression/audit-online.mjs（REG_ONLINE 可覆盖目标）
  */
-import { Reporter, ONLINE, BASE } from "./lib.mjs";
+import { Reporter, ONLINE, BASE, webPath } from "./lib.mjs";
 import { statSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+
+// 实物图在前端仓，不在本仓。HTTP 体积仍打 REG_ONLINE。
+const SHOTS_DIR = webPath("public", "help-shots");
 
 const rep = new Reporter("audit-online");
 
@@ -88,12 +90,12 @@ for (const [f, cap] of Object.entries(SHOT_SIZE_CAPS)) {
 
 // 4b) 守线基线防漂移自检（指令63 A2）：
 // (i) 上限恒须 = ceil(采纳基线 × 1.3)——上限或基线任一被手改即 FAIL；
-// (ii) 仓内实物体积（public/help-shots，本地可读时）与采纳基线偏差须在
-//      容差 [+5%, −20%] 内（容差吸收日期驱动的内容翻转，如超期徽标增减）；
+// (ii) 前端仓实物体积（REG_WEB_ROOT/public/help-shots，可读时）与采纳基线
+//      偏差须在容差 [+5%, −20%] 内（容差吸收日期驱动的内容翻转，如超期徽标增减）；
 //      实物显著偏离基线 = 「基线过期」FAIL，提示按新采纳体积重定基线。
-//      本地文件不可读（如脱离仓库运行）时该项 info 跳过，(i) 恒跑。
+//      目录不可读时该项 info 跳过，(i) 恒跑。
 {
-  const shotsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
+  const shotsDir = SHOTS_DIR;
   for (const [f, base] of Object.entries(SHOT_SIZE_BASE)) {
     const cap = SHOT_SIZE_CAPS[f];
     const expect = Math.ceil(base * 1.3);
@@ -109,7 +111,7 @@ for (const [f, cap] of Object.entries(SHOT_SIZE_CAPS)) {
       actual = null;
     }
     if (actual === null) {
-      rep.info(`守线自检 ${f}：仓内实物不可读，实物对位跳过`);
+      rep.info(`守线自检 ${f}：${shotsDir} 实物不可读，实物对位跳过`);
       continue;
     }
     const inTol = actual <= Math.ceil(base * 1.05) && actual >= Math.floor(base * 0.8);
@@ -176,7 +178,7 @@ try {
 // 7) 三处同数（指令64 A6）：/help 引用图数 = SHOT_SIZE_BASE 条目数 = 实物文件数。
 // 加图/删图须三处同步（页面引用、守线基线、实物文件），任一侧漏改即 FAIL。
 {
-  const shotsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
+  const shotsDir = SHOTS_DIR;
   const baseCount = Object.keys(SHOT_SIZE_BASE).length;
   let files = null;
   try {
@@ -185,7 +187,7 @@ try {
     files = null;
   }
   if (files === null) {
-    rep.info("三处同数：public/help-shots 不可读，实物侧跳过（脱离仓库运行时）");
+    rep.info(`三处同数：${shotsDir} 不可读，实物侧跳过`);
   } else {
     rep.check(
       "三处同数：SHOT_SIZE_BASE 条目数 = help-shots 实物文件数",

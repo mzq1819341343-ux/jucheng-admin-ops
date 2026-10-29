@@ -135,7 +135,8 @@ function hasRe(name, text, re) {
 
 // —— 成员页（老板轨，指令60 A2）：待邀请名单区结构在位 + 演示意向三行渲染 ——
 // 名单对店员/合伙人整节不渲染的 absent 断言在 audit-staff；本轨只固化老板侧
-// 结构与演示三行（lib/data.ts FALLBACK_MEMBER_INVITES），防结构漂移。
+// 结构与演示三行来自前端仓 REG_WEB_ROOT/lib/data.ts 的 FALLBACK_MEMBER_INVITES。
+// 本脚本只对 REG_BASE 上已启动的页面做断言，不读该源码文件。
 // 注意：演示三行 ≠ 真机已生效——migration_008 未执行前真实模式走降级提示。
 {
   const { page, resp } = await openPage("/members");

@@ -1,12 +1,14 @@
 /**
  * 守线偏差趋势自动留痕（指令66 A2 建，65-A5 手工表脚本化；指令67 A2
  * 续跑，ROUND_POINTS 已增至 66 收尾点）：
- * 只读脚本——从 git 历史逐轮收尾点取 help-shots 八图实物字节，生成偏差
+ * 只读脚本——从 jucheng-admin-web（REG_WEB_ROOT）的 git 历史逐轮收尾点取
+ * help-shots 八图实物字节，生成偏差
  * 趋势表，与 docs/运维_性能基线.md 中 65-A5 已记值逐值比对；偏差距容差
  * 沿 ≤1.5pt（逼近区）时在输出末尾显式提示。
  *
- * 纪律：只提示、不改基线、不改图；本脚本不纳入 run-all 断言（退出码
- * 恒为 0，比对不一致以「不一致」行显式列出，由当轮验收人工裁处）。
+ * 纪律：只提示、不改基线、不改图；本脚本不纳入 run-all 断言（比对不一致
+ * 仍以退出码 0 结束，由当轮验收人工裁处）。git 读不到前端仓里的历史
+ * 提交时退出码 1（软分库改写了 ROUND_POINTS 的单体仓 SHA）。
  * 采纳基线单源 = audit-online.mjs 的 SHOT_SIZE_BASE（正则解析，不复制
  * 常量）；容差沿与 audit-online 4b 一致：[−20%, +5%]。
  *
@@ -16,8 +18,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { WEB_ROOT } from "./lib.mjs";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// 脚本与基线文档在本仓；help-shots 的 git 对象在前端仓。
+const opsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FILES = [
   "overview.png",
   "expenses.png",
@@ -46,7 +50,7 @@ const devOf = (size, base) => ((size - base) / base) * 100;
 const fmtDev = (d) => `${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(2)}%`;
 
 // —— 采纳基线：解析 audit-online.mjs 的 SHOT_SIZE_BASE（单源）——
-const onlineSrc = readFileSync(join(root, "scripts/regression/audit-online.mjs"), "utf8");
+const onlineSrc = readFileSync(join(opsRoot, "scripts/regression/audit-online.mjs"), "utf8");
 const baseBlock = onlineSrc.match(/const SHOT_SIZE_BASE = \{([\s\S]*?)\};/);
 if (!baseBlock) {
   console.error("无法从 audit-online.mjs 解析 SHOT_SIZE_BASE，脚本中止。");
@@ -56,15 +60,28 @@ const BASE = {};
 for (const m of baseBlock[1].matchAll(/"([\w.-]+)":\s*(\d+)/g)) BASE[m[1]] = Number(m[2]);
 
 // —— git 历史逐轮取字节 ——
+function gitInWeb(args) {
+  try {
+    return execFileSync("git", args, {
+      cwd: WEB_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    const detail = (e.stderr || e.message || "").toString().trim();
+    console.error(
+      `错误：在 REG_WEB_ROOT（${WEB_ROOT}）执行 git ${args.join(" ")} 失败。help-shots 历史只在 jucheng-admin-web 里；软分库改写了提交号，ROUND_POINTS 若仍是单体仓 SHA，需换成该仓对应提交后再跑。${detail}`
+    );
+    process.exit(1);
+  }
+}
 function gitSize(commit, file) {
-  const out = execFileSync("git", ["cat-file", "-s", `${commit}:public/help-shots/${file}`], {
-    cwd: root,
-    encoding: "utf8",
-  });
+  // 路径相对前端仓根目录，不是本仓。
+  const out = gitInWeb(["cat-file", "-s", `${commit}:public/help-shots/${file}`]);
   return Number(out.trim());
 }
 function gitSubject(commit) {
-  return execFileSync("git", ["log", "-1", "--format=%s", commit], { cwd: root, encoding: "utf8" }).trim();
+  return gitInWeb(["log", "-1", "--format=%s", commit]).trim();
 }
 const sizes = {}; // sizes[file][round] = bytes
 const subjectWarn = [];
@@ -77,7 +94,7 @@ for (const { round, commit } of ROUND_POINTS) {
 }
 
 // —— 基线文档 65-A5 已记值：解析「守线偏差趋势」节表格 ——
-const doc = readFileSync(join(root, "docs/运维_性能基线.md"), "utf8");
+const doc = readFileSync(join(opsRoot, "docs/运维_性能基线.md"), "utf8");
 const secStart = doc.indexOf("## 守线偏差趋势");
 const sec = secStart >= 0 ? doc.slice(secStart) : "";
 const tableLines = sec.split("\n").filter((l) => l.startsWith("|"));

@@ -11,8 +11,8 @@
  * - dashboard-drill 先展开「门店成本」一级下钻与两店二级下钻再截 net-panel。
  *
  * 全部为演示数据截图，/help 图注已统一标注「示例截图（演示数据）」与刷新日期。
- * 指令58 A2：截图完成后自动把 app/help/page.tsx 八处「截图刷新：YYYY-MM-DD」
- * 更新为运行当日（Asia/Shanghai），图注日期不再靠手工对齐。
+ * 指令58 A2：截图完成后自动把前端仓 app/help/page.tsx（REG_WEB_ROOT 下）
+ * 八处「截图刷新：YYYY-MM-DD」更新为运行当日（Asia/Shanghai），图注日期不再靠手工对齐。
  * 指令60 A3：两张手机长图截后经 quantize_png.py 做 256 色量化（全分辨率，
  * 体积约 −60%）；PIL 不可用时保留原图并警告。
  * 指令61 A5：量化后处理扩至全八图（桌面六图评估达标线 PSNR ≥ 40dB、
@@ -20,13 +20,20 @@
  * 评估表见 docs/运维_性能基线.md）；达标名单即下方 QUANTIZE_FILES。
  * 用法：node scripts/regression/capture-help-shots.mjs（需本地演示服务已启动）
  */
-import { launchBrowser, BASE } from "./lib.mjs";
-import { readFileSync, writeFileSync } from "node:fs";
+import { launchBrowser, BASE, WEB_ROOT, webPath } from "./lib.mjs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public", "help-shots");
+// 截图与图注都落在前端仓。提交须在 jucheng-admin-web 开 PR，不要放进本仓。
+const OUT = webPath("public", "help-shots");
+if (!existsSync(OUT)) {
+  console.error(
+    `错误：截图输出目录不存在：${OUT}。REG_WEB_ROOT（${WEB_ROOT}）须指向含 public/help-shots 的 jucheng-admin-web 检出。`
+  );
+  process.exit(2);
+}
 const browser = await launchBrowser();
 
 // ---------- 桌面 ----------
@@ -140,11 +147,20 @@ try {
   console.log(`warn: 量化后处理跳过（python3/PIL 不可用），保留原图：${e.message}`);
 }
 console.log(`done -> ${OUT}`);
+console.log("这些文件在前端仓（jucheng-admin-web）。提交请在该仓开 PR，不要放进 ops 仓。");
 
 // ---------- 图注日期自动对齐（指令58 A2） ----------
 const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
-const helpPath = join(OUT, "..", "..", "app", "help", "page.tsx");
-const helpSrc = readFileSync(helpPath, "utf8");
+const helpPath = webPath("app", "help", "page.tsx");
+let helpSrc;
+try {
+  helpSrc = readFileSync(helpPath, "utf8");
+} catch (e) {
+  console.error(
+    `错误：无法读取 ${helpPath}。REG_WEB_ROOT 须指向含 app/help/page.tsx 的 jucheng-admin-web 检出。截图已写入 ${OUT}。${e.message}`
+  );
+  process.exit(2);
+}
 const captionDates = helpSrc.match(/截图刷新：\d{4}-\d{2}-\d{2}/g) || [];
 const helpNext = helpSrc.replace(/截图刷新：\d{4}-\d{2}-\d{2}/g, `截图刷新：${today}`);
 if (helpNext !== helpSrc) writeFileSync(helpPath, helpNext);
