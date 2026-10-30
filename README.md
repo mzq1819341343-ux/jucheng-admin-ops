@@ -16,9 +16,10 @@
 ## 目录
 
 ```
-supabase/                 schema.sql、seed.sql、migration_002 … migration_010
+supabase/                 schema.sql、seed.sql、migration_002 … migration_011
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
-scripts/payroll/          实时工资草案（不连库）
+scripts/payroll/          实时工资草案（计算不连库）
+scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
 scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 ```
@@ -26,7 +27,7 @@ scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 ## Supabase 初始化（一次性）
 
 1. 在 Supabase 新建项目。
-2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。脚本不连库。
+2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。`migration_011_salary_realtime_draft.sql` 是已在当前线上库落库的过关稿归档，本仓不代执行。脚本默认不连库。
 3. Settings → API 复制 Project URL 与 anon public key，填到前端仓 `.env.local`（模板在该仓 `.env.example`）。service role key 只留在服务端，不要加 `NEXT_PUBLIC_` 前缀，也不要提交。
 
 ## 抓数管道
@@ -39,7 +40,7 @@ python3 docs/fetch-pipeline/auto_fetch.py --check
 
 管道只落盘样本。crontab / launchd 示例是注释态，未安装。
 
-## 实时工资草案（不写库、不入仓）
+## 实时工资草案
 
 ```bash
 python3 scripts/payroll/realtime_payroll.py \
@@ -50,6 +51,16 @@ python3 scripts/payroll/realtime_payroll.py \
 ```
 
 标准输出只打印汇总锚点。个人清单留在 `--out-dir`，不要提交。前端人效卡读 web 仓 `lib/realtime-payroll.ts`。在月结校准合并之前不要改那些汇总数。
+
+把这份 JSON upsert 进 `salary_realtime_draft`：
+
+```bash
+python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON>
+ALLOW_APPLY_REALTIME_DRAFT=true \
+  python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON> --apply
+```
+
+默认 dry-run。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立，并且只处理当月、只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
 
 ## 运维清单
 
