@@ -1,0 +1,16 @@
+{
+  "note": "实时草案在职名单样例。base_salary 缺省也按 2000。旧的仅姓名列表不能用。不要把这份名单复制进文档或算数脚本。",
+  "active": [
+    {"name": "张浩冉", "role": "上门", "base_salary": 2000},
+    {"name": "张静怡", "role": "上门", "base_salary": 2000},
+    {"name": "李冬浩", "role": "门店", "base_salary": 2000},
+    {"name": "刘市伟", "role": "门店", "base_salary": 2000},
+    {"name": "子拉兰", "role": "门店", "base_salary": 2000},
+    {"name": "王毅杰", "role": "门店", "base_salary": 2000},
+    {"name": "杜飞", "role": "门店", "base_salary": 2000}
+  ],
+  "excluded": [
+    {"person": "吕文飞", "reason": "硬排除，不计薪"},
+    {"person": "杨燕辉", "reason": "硬排除，不计薪"}
+  ]
+}

@@ -10,6 +10,8 @@ pipeline_config.json 的 APPLY 保持 false。本脚本只读该键、不改文�
 
 只写表 salary_realtime_draft。只处理 Asia/Shanghai 当月（可用 pipeline
 配置 TIMEZONE）。冲突键 (month, person_name)。不删除未出现在本次产出里的行。
+不写 role 列（表上没有）。新口径标签若出现在 payroll meta.caliber，只写进 caliber 文本。
+双闸逻辑不改。不碰 salary_detail_import / salary_monthly。
 
 用法：
   python3 scripts/apply_realtime_payroll_draft.py \\
@@ -100,13 +102,39 @@ def money_text(value):
 
 
 def build_caliber(meta):
-    roster = "active" if meta.get("active_roster") else "all"
-    return "realtime_payroll|effective_from=%s|online_mode=%s|roster=%s|statement=%s" % (
+    """金额列不变。新口径只追加 meta.caliber 里已有的标签，不新增表列。
+
+    salary_realtime_draft 没有 role 列，角色不进 UPSERT。双闸逻辑不在这里改。
+    """
+    roster_meta = meta.get("active_roster")
+    if isinstance(roster_meta, dict) and roster_meta.get("source") in ("json", "employees"):
+        roster = roster_meta["source"]
+    elif roster_meta:
+        roster = "active"
+    else:
+        roster = "all"
+    base = "realtime_payroll|effective_from=%s|online_mode=%s|roster=%s|statement=%s" % (
         meta.get("effective_from") or "",
         meta.get("online_mode") or "",
         roster,
         meta.get("statement") or "",
     )
+    cal = meta.get("caliber")
+    if not isinstance(cal, dict):
+        return base
+    extra = []
+    online = str(cal.get("online_mode") or "")
+    if online:
+        extra.append("online_caliber=%s" % online)
+    door = str(cal.get("door_profit_pct") or "")
+    if door:
+        extra.append("door=%s" % door)
+    acc = str(cal.get("accessories_pct") or "")
+    if acc:
+        extra.append("accessories=%s" % acc)
+    if not extra:
+        return base
+    return base + "|" + "|".join(extra)
 
 
 def rows_from_payload(payload, month, as_of_iso):
