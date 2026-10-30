@@ -1,39 +1,54 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""线上判定冒烟：ONLINE_MODE=source_not_门店，不再只认官网。
+"""工资新口径冒烟。
 
-仓内脱敏样本 docs/fetch-pipeline/samples/191/normalized_sample.csv
-没有业务列「来源类型」（其 source_type 只是管道格式标记 orders37），
-不能当工资输入，也不能复算线上池。本脚本：
+线上仍是 ONLINE_MODE=source_not_门店，只对门店角色。另测：
+  门店角色的上门单 → 线上 ×1%，不进 door、不进门店阶梯，底薪缺省 2000；
+  上门角色：底薪强制 0；全部订单分润 ×50%；不进 online；
+  仅交易方式=门店订单 × 固定 4%，不含券为空则回退订单金额；
+  无配件源 → 0；有独立导出 → 实付 ×30%；191 列冒充被拒绝；
+  缺 role / 仅姓名列表 → 失败；
+  硬排除只剩吕文飞、杨燕辉；
+  employees 只读分支（注入假数据，不连库）。
 
-1. 断言该样本缺「来源类型」，且 realtime_payroll 拒绝把它当 orders37。
-2. 用临时 orders37 形状 CSV（官网 / BD / 其他 / 空来源 / 门店）跑草案，
-   断言非门店来源都进线上、来源类型=门店不进。
-3. 顺带锁底薪 2000、门店阶梯、上门 50%、配件 0、EFFECTIVE_FROM、硬排除。
-
-不连库、不改样本、个人级输出只落临时目录并在结束时删除。
+不连生产库，不灌草案。个人级输出只落临时目录并在结束时删除。
 """
 
 import csv
 import importlib.util
+import io
 import json
 import sys
 import tempfile
+import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[2]
 SAMPLE = REPO / "docs" / "fetch-pipeline" / "samples" / "191" / "normalized_sample.csv"
+EXAMPLE = Path(__file__).resolve().parent / "active_roster.example.json"
+CONFIG = REPO / "docs" / "fetch-pipeline" / "pipeline_config.json"
 HEADER = ["物品编号", "门店名称", "取货方式", "订单状态", "分润金额", "完成时间",
           "来源类型", "订单金额（不含券）", "门店验货人"]
+NOW = datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
-def load_payroll():
-    path = Path(__file__).resolve().parent / "realtime_payroll.py"
-    spec = importlib.util.spec_from_file_location("realtime_payroll", path)
+def load_mod(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def load_payroll():
+    return load_mod("realtime_payroll", Path(__file__).resolve().parent / "realtime_payroll.py")
+
+
+def load_apply():
+    return load_mod("apply_realtime_payroll_draft", REPO / "scripts" / "apply_realtime_payroll_draft.py")
 
 
 def write_orders(path, rows):
@@ -43,14 +58,70 @@ def write_orders(path, rows):
         w.writerows(rows)
 
 
+def write_orders_ext(path, rows):
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(HEADER + ["交易方式", "订单金额"])
+        w.writerows(rows)
+
+
 def person(payload, name):
     hits = [p for p in payload["people"] if p["person"] == name]
-    assert len(hits) == 1, payload["people"]
+    assert len(hits) == 1, (name, [p["person"] for p in payload["people"]])
     return hits[0]
+
+
+def dec(value):
+    return Decimal(str(value))
+
+
+def assert_gross(row):
+    expect = (dec(row["base_salary"]) + dec(row["door_commission"]) + dec(row["online_commission"])
+              + dec(row["store_commission"]) + dec(row["accessories_commission"]))
+    assert dec(row["gross"]) == expect, (row["person"], row["gross"], expect)
+
+
+def dump_roster(path, active, excluded=None):
+    path.write_text(json.dumps({
+        "active": active,
+        "excluded": excluded or [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def run(pay, argv, env=None, fetcher=None):
+    if fetcher is None:
+        def fetcher(_env):
+            raise AssertionError("JSON 路径不应读取 employees")
+    err = io.StringIO()
+    with redirect_stderr(err):
+        rc = pay.main(list(argv), env={} if env is None else env, employees_fetcher=fetcher)
+    return rc, err.getvalue()
+
+
+def base_orders():
+    return [
+        ["A1", "石河子万达店", "上门", "已完成", "200", "2026-10-01 10:00:00", "官网", "10000", "甲"],
+        ["A2", "石河子万达店", "到店", "已完成", "10", "2026-10-02 10:00:00", "BD", "20000", "甲"],
+        ["A3", "石河子万达店", "到店", "已完成", "0", "2026-10-03 10:00:00", "门店", "30000", "甲"],
+        ["B1", "石河子友谊商厦店", "上门", "已完成", "80", "2026-10-04 10:00:00", "其他渠道", "10000", "乙"],
+        ["B2", "石河子友谊商厦店", "到店", "已完成", "", "2026-10-05 10:00:00", "", "5000", "乙"],
+        ["B3", "石河子友谊商厦店", "到店", "已完成", "40", "2026-10-06 10:00:00", "门店", "", "乙"],
+    ]
+
+
+def both_store_roster(path):
+    """甲、乙都是门店角色，用来锁住 A1 与「非门店来源仍进线上」。"""
+    dump_roster(path, [
+        {"name": "甲", "role": "门店"},
+        {"person_name": "乙", "role": "门店"},
+    ])
 
 
 def main():
     pay = load_payroll()
+    cfg_before = CONFIG.read_bytes()
+    assert not hasattr(pay, "ACCESSORIES_TIERS")
+    assert pay.ACCESSORIES_PCT == Decimal("0.30")
     assert pay.ONLINE_MODE == "source_not_门店"
     assert pay.ONLINE_PCT == Decimal("0.01")
     assert pay.BASE_SALARY == Decimal("2000")
@@ -66,7 +137,9 @@ def main():
         (Decimal("30000"), Decimal("0.03")),
     ]
     assert pay.EFFECTIVE_FROM == "2026-10"
-    assert pay.HARD_EXCLUDED == ("张浩冉", "张静怡", "杨燕辉", "吕文飞")
+    assert pay.HARD_EXCLUDED == ("吕文飞", "杨燕辉")
+    assert "张浩冉" not in pay.HARD_EXCLUDED
+    assert "张静怡" not in pay.HARD_EXCLUDED
     for src, expect in (
         ("官网", True),
         ("BD", True),
@@ -90,6 +163,28 @@ def main():
     finally:
         pay.ONLINE_MODE = locked
 
+    req = pay.build_employees_request("https://example.supabase.co", "test-secret")
+    parsed = urllib.parse.urlparse(req.full_url)
+    assert parsed.path == "/rest/v1/employees"
+    assert req.get_method() == "GET"
+    assert req.data is None
+    qs = urllib.parse.parse_qs(parsed.query)
+    assert qs["select"] == [pay.EMPLOYEES_SELECT]
+    assert qs["employment_status"] == ["eq.在职"]
+    assert "test-secret" not in (parsed.query or "")
+    try:
+        pay.build_employees_request("http://example.supabase.co", "test-secret")
+    except pay.DraftRejected as exc:
+        assert exc.code == pay.EXIT_ERROR
+    else:
+        raise SystemExit("非 https 的 employees 读取应被拒绝")
+    try:
+        pay.default_employees_fetcher({})
+    except pay.DraftRejected as exc:
+        assert "SUPABASE" in str(exc)
+    else:
+        raise SystemExit("没有凭据时不应连接 employees")
+
     with SAMPLE.open(encoding="utf-8") as fh:
         sample_header = next(csv.reader(fh))
     assert "来源类型" not in sample_header, sample_header
@@ -100,108 +195,481 @@ def main():
         sample_out = tmp / "sample_rejected"
         try:
             pay.main(["--input", str(SAMPLE), "--month", "2026-10",
-                      "--out-dir", str(sample_out)])
+                      "--out-dir", str(sample_out)], env={})
         except Exception as exc:
             assert "关键列缺失" in str(exc), exc
         else:
             raise SystemExit("脱敏样本不应被当成 orders37 工资输入")
 
-        early = pay.main(["--input", str(SAMPLE), "--month", "2026-09",
-                          "--out-dir", str(tmp / "early")])
+        early, _err = run(pay, ["--input", str(SAMPLE), "--month", "2026-09",
+                                 "--out-dir", str(tmp / "early")])
         assert early == 2, early
 
-        rows = [
-            ["A1", "石河子万达店", "上门", "已完成", "200", "2026-10-01 10:00:00", "官网", "10000", "甲"],
-            ["A2", "石河子万达店", "到店", "已完成", "10", "2026-10-02 10:00:00", "BD", "20000", "甲"],
-            ["A3", "石河子万达店", "到店", "已完成", "0", "2026-10-03 10:00:00", "门店", "30000", "甲"],
-            ["B1", "石河子友谊商厦店", "上门", "已完成", "80", "2026-10-04 10:00:00", "其他渠道", "10000", "乙"],
-            ["B2", "石河子友谊商厦店", "到店", "已完成", "", "2026-10-05 10:00:00", "", "5000", "乙"],
-            ["B3", "石河子友谊商厦店", "到店", "已完成", "40", "2026-10-06 10:00:00", "门店", "", "乙"],
-        ]
+        rows = base_orders()
         src = tmp / "orders.csv"
         write_orders(src, rows)
+        roster = tmp / "roster.json"
+        both_store_roster(roster)
         out = tmp / "out"
-        rc = pay.main(["--input", str(src), "--month", "2026-10",
-                       "--source-label", "smoke", "--out-dir", str(out)])
-        assert rc == 0, rc
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--source-label", "smoke", "--active-roster", str(roster),
+                            "--out-dir", str(out)])
+        assert rc == 0, err
         payload = json.loads((out / "payroll_2026-10.json").read_text(encoding="utf-8"))
         text = "\n".join(payload["meta"]["assumptions"])
         assert "已拍板" in text
         assert "假设·待老板确认" not in text
+        assert "缺配件源" in text
         assert payload["meta"]["online_mode"] == "source_not_门店"
+        assert payload["meta"]["caliber"]["online_mode"] == (
+            "source_not_门店+store_role_door_as_online|door_role_no_online")
+        assert payload["meta"]["caliber"]["door_profit_pct"] == "50|role=上门_all_profit"
+        assert payload["meta"]["caliber"]["door_role_base"] == "0"
+        assert payload["meta"]["caliber"]["door_role_store_pct"] == (
+            "4|trade=门店订单|amt=不含券_else_订单金额")
+        assert payload["meta"]["caliber"]["accessories_pct"] == "30|source=none"
+        assert payload["meta"]["caliber"]["roster"] == "json"
+        assert payload["meta"]["accessories"]["pct"] == 30
         assert payload["meta"]["effective_from"] == "2026-10"
 
         jia = person(payload, "甲")
         yi = person(payload, "乙")
-        # 只认官网时甲的线上金额会是 10000、乙为 0。BD / 其他 / 空来源必须计入。
+        assert jia["role"] == "门店" and yi["role"] == "门店"
+        # A1：甲的上门取货单仍进线上一次；到店且来源=门店的 30000 不进线上。
         assert jia["online_orders"] == 2, jia
         assert jia["online_amt"] == 30000.0, jia
         assert jia["online_commission"] == 300.0, jia
         assert yi["online_orders"] == 2, yi
         assert yi["online_amt"] == 15000.0, yi
         assert yi["online_commission"] == 150.0, yi
-        assert jia["door_commission"] == 100.0, jia
-        assert yi["door_commission"] == 40.0, yi
+        assert jia["door_commission"] == 0.0, jia
+        assert yi["door_commission"] == 0.0, yi
         assert jia["base_salary"] == 2000.0
         assert yi["base_salary"] == 2000.0
         assert jia["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
         assert "不做1–9月个人例外" in jia["base_salary_source"]
         assert jia["accessories_commission"] == 0.0
         assert yi["accessories_commission"] == 0.0
-        # 万达不含券 60000 → 4%；友谊 15000 → 0%。门店来源的 30000 进阶梯、不进线上。
-        assert jia["store_commission"] == 2400.0, jia
+        # 上门取货 10000 剔出阶梯后，万达基数 50000 → 3%，甲的份额就是这 50000。
+        assert jia["store_base_amt"] == 50000.0, jia
+        assert jia["store_commission"] == 1500.0, jia
         assert yi["store_commission"] == 0.0, yi
         stores = payload["meta"]["store_tier_reference"]
-        assert stores["石河子万达店"]["tier_rate_by_base"] == 0.04
+        assert stores["石河子万达店"]["base_amt_excl_coupon"] == 50000.0
+        assert stores["石河子万达店"]["store_role_door_excluded_amt"] == 10000.0
+        assert stores["石河子万达店"]["tier_rate_by_base"] == 0.03
+        assert stores["石河子友谊商厦店"]["base_amt_excl_coupon"] == 5000.0
+        assert stores["石河子友谊商厦店"]["store_role_door_excluded_amt"] == 10000.0
         assert stores["石河子友谊商厦店"]["tier_rate_by_base"] == 0.0
         assert payload["totals"]["online_commission_total"] == 450.0
-        assert payload["totals"]["door_commission_total"] == 140.0
+        assert payload["totals"]["door_commission_total"] == 0.0
         assert payload["totals"]["base_salary_total"] == 4000.0
-        assert payload["totals"]["store_commission_total"] == 2400.0
+        assert payload["totals"]["store_commission_total"] == 1500.0
         assert payload["totals"]["accessories_commission_total"] == 0.0
-        assert payload["totals"]["gross_total"] == 6990.0
+        assert payload["totals"]["gross_total"] == 5950.0
+        assert_gross(jia)
+        assert_gross(yi)
         csv_head = (out / "payroll_2026-10.csv").read_text(encoding="utf-8").splitlines()[0]
-        assert "线上单量(非门店来源)" in csv_head
+        assert "线上提成(1%)" in csv_head
+        assert "上门提成(50%·上门角色全部订单)" in csv_head
+        assert "配件提成(实付×30%)" in csv_head
         assert "官网来源" not in csv_head
 
-        roster = tmp / "roster.json"
-        roster.write_text(json.dumps({
-            "active": ["甲"],
-            "excluded": [{"person": "乙", "reason": "冒烟排除"}],
-        }, ensure_ascii=False), encoding="utf-8")
+        missing_acc = tmp / "no-such-accessories.csv"
+        out_missing = tmp / "missing_acc"
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(roster),
+                            "--accessories-input", str(missing_acc),
+                            "--out-dir", str(out_missing)])
+        assert rc == 0, err
+        missing_payload = json.loads((out_missing / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        assert missing_payload["meta"]["accessories"]["source"] == "none"
+        assert "不存在" in missing_payload["meta"]["accessories"]["note"]
+        assert person(missing_payload, "甲")["accessories_commission"] == 0.0
+
+        roster_one = tmp / "roster_one.json"
+        dump_roster(roster_one, [{"name": "甲", "role": "门店"}],
+                    [{"person": "乙", "reason": "冒烟排除"}])
         out_r = tmp / "roster_out"
-        rc = pay.main(["--input", str(src), "--month", "2026-10",
-                       "--active-roster", str(roster), "--out-dir", str(out_r)])
-        assert rc == 0, rc
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(roster_one), "--out-dir", str(out_r)])
+        assert rc == 0, err
         filtered = json.loads((out_r / "payroll_2026-10.json").read_text(encoding="utf-8"))
         assert [p["person"] for p in filtered["people"]] == ["甲"]
         assert filtered["totals"]["excluded_orders"] == 3
         assert filtered["meta"]["active_roster"]["excluded_people"] == 1
         assert person(filtered, "甲")["online_commission"] == 300.0
+        assert person(filtered, "甲")["door_commission"] == 0.0
+        assert person(filtered, "甲")["store_commission"] == 1500.0
 
         exc_path = tmp / "exceptions.json"
         exc_path.write_text(json.dumps({"甲": 1500}, ensure_ascii=False), encoding="utf-8")
         out_e = tmp / "exc_out"
-        rc = pay.main(["--input", str(src), "--month", "2026-10",
-                       "--base-exceptions", str(exc_path), "--out-dir", str(out_e)])
-        assert rc == 0, rc
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(roster),
+                            "--base-exceptions", str(exc_path), "--out-dir", str(out_e)])
+        assert rc == 0, err
         excused = json.loads((out_e / "payroll_2026-10.json").read_text(encoding="utf-8"))
         assert person(excused, "甲")["base_salary"] == 1500.0
+        assert person(excused, "甲")["base_breakdown"]["basic"] == 1500.0
+        assert person(excused, "甲")["base_breakdown"]["attendance"] == 0.0
         assert person(excused, "乙")["base_salary"] == 2000.0
         assert any("非现行路径" in a for a in excused["meta"]["assumptions"])
 
-        leaked_rows = rows + [
-            ["Z1", "石河子万达店", "到店", "已完成", "1", "2026-10-07 10:00:00", "官网", "100", "张浩冉"],
-        ]
-        leaked = tmp / "leaked.csv"
-        write_orders(leaked, leaked_rows)
-        rc = pay.main(["--input", str(leaked), "--month", "2026-10",
-                       "--out-dir", str(tmp / "leaked_out")])
-        assert rc == 3, rc
-        assert not (tmp / "leaked_out").exists()
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--out-dir", str(tmp / "no_roster")])
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "拒绝出草案" in err and "role" in err
+        assert not (tmp / "no_roster").exists()
 
-    print("smoke_online_mode PASS：非门店来源（官网/BD/其他/空）计入线上，来源类型=门店不计入；"
-          "底薪 2000、门店阶梯、上门 50%、配件 0、EFFECTIVE_FROM、在职过滤与硬排除保持。")
+        names_only = tmp / "names_only.json"
+        names_only.write_text(json.dumps({"active": ["甲"]}, ensure_ascii=False), encoding="utf-8")
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(names_only),
+                            "--out-dir", str(tmp / "names_only_out")])
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "仅姓名" in err
+        assert not (tmp / "names_only_out").exists()
+
+        no_role = tmp / "no_role.json"
+        dump_roster(no_role, [{"name": "甲"}])
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(no_role),
+                            "--out-dir", str(tmp / "no_role_out")])
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "缺少 role" in err
+        assert not (tmp / "no_role_out").exists()
+
+        blocked = tmp / "blocked.json"
+        dump_roster(blocked, [{"name": "吕文飞", "role": "门店"}, {"name": "甲", "role": "上门"}])
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(blocked),
+                            "--out-dir", str(tmp / "blocked_out")])
+        assert rc == pay.EXIT_HARD_EXCLUDED, (rc, err)
+        assert "吕文飞" in err
+        assert not (tmp / "blocked_out").exists()
+
+        role_rows = [
+            ["C1", "石河子万达店", "上门", "已完成", "1000", "2026-10-01 10:00:00", "门店", "30000", "丙"],
+            ["C2", "石河子万达店", "到店", "已完成", "0", "2026-10-02 10:00:00", "官网", "30000", "戊"],
+            ["C3", "石河子万达店", "上门", "已完成", "400", "2026-10-03 10:00:00", "官网", "5000", "庚"],
+            ["D1", "石河子友谊商厦店", "上门", "已完成", "200", "2026-10-04 10:00:00", "官网", "8000", "己"],
+            ["D2", "石河子友谊商厦店", "到店", "已完成", "50", "2026-10-05 10:00:00", "门店", "1000", "己"],
+        ]
+        role_src = tmp / "roles.csv"
+        write_orders(role_src, role_rows)
+        role_roster = tmp / "roles.json"
+        dump_roster(role_roster, [
+            {"name": "丙", "role": "门店"},
+            {"name": "戊", "role": "门店"},
+            {"name": "庚", "role": "门店"},
+            {"name": "己", "role": "上门"},
+        ])
+        out_role = tmp / "roles_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster), "--out-dir", str(out_role)])
+        assert rc == 0, err
+        roles = json.loads((out_role / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        bing = person(roles, "丙")
+        wu = person(roles, "戊")
+        geng = person(roles, "庚")
+        ji = person(roles, "己")
+        assert bing["role"] == "门店"
+        assert bing["online_amt"] == 30000.0 and bing["online_commission"] == 300.0
+        assert bing["door_commission"] == 0.0 and bing["door_orders"] == 1
+        assert bing["store_commission"] == 0.0 and bing["store_base_amt"] == 0.0
+        assert wu["online_commission"] == 300.0
+        assert wu["store_base_amt"] == 30000.0 and wu["store_commission"] == 900.0
+        assert geng["online_amt"] == 5000.0 and geng["online_commission"] == 50.0
+        assert geng["door_commission"] == 0.0 and geng["store_commission"] == 0.0
+        assert ji["role"] == "上门"
+        assert ji["base_salary"] == 0.0
+        assert ji["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert ji["door_profit"] == 250.0 and ji["door_commission"] == 125.0
+        assert ji["door_orders"] == 2
+        assert ji["online_orders"] == 0 and ji["online_amt"] == 0.0 and ji["online_commission"] == 0.0
+        assert ji["store_base_amt"] == 0.0 and ji["store_commission"] == 0.0
+        ref = roles["meta"]["store_tier_reference"]
+        assert ref["石河子万达店"]["base_amt_excl_coupon"] == 30000.0
+        assert ref["石河子万达店"]["tier_rate_by_base"] == 0.03
+        assert ref["石河子万达店"]["store_role_door_excluded_amt"] == 35000.0
+        assert ref["石河子友谊商厦店"]["base_amt_excl_coupon"] == 9000.0
+        assert ref["石河子友谊商厦店"]["tier_rate_by_base"] == 0.0
+        for row in roles["people"]:
+            assert_gross(row)
+        assert roles["totals"]["accessories_commission_total"] == 0.0
+
+        acc = tmp / "accessories.csv"
+        acc.write_text(
+            "归属人,实付金额,完成时间\n"
+            "己,1000,2026-10-01\n"
+            "己,500,2026-10-02\n"
+            "路人,200,2026-10-03\n"
+            "己,999,2026-09-01\n",
+            encoding="utf-8")
+        out_acc = tmp / "acc_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster),
+                            "--accessories-input", str(acc), "--out-dir", str(out_acc)])
+        assert rc == 0, err
+        with_acc = json.loads((out_acc / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        ji_acc = person(with_acc, "己")
+        assert ji_acc["accessories_paid"] == 1500.0
+        assert ji_acc["accessories_commission"] == 450.0
+        assert ji_acc["base_salary"] == 0.0
+        assert ji_acc["door_commission"] == 125.0
+        assert ji_acc["online_commission"] == 0.0
+        assert ji_acc["gross"] == 575.0
+        assert_gross(ji_acc)
+        assert all(p["person"] != "路人" for p in with_acc["people"])
+        assert with_acc["meta"]["accessories"]["unmatched_people"] == 1
+        assert with_acc["meta"]["accessories"]["rows_in_month"] == 3
+        assert with_acc["totals"]["accessories_commission_total"] == 450.0
+        assert "30|source=" in with_acc["meta"]["caliber"]["accessories_pct"]
+
+        fake_191 = tmp / "fake_191.csv"
+        write_orders(fake_191, role_rows[:1])
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster),
+                            "--accessories-input", str(fake_191),
+                            "--out-dir", str(tmp / "fake_191_out")])
+        assert rc == pay.EXIT_ERROR, (rc, err)
+        assert "冒充" in err
+        assert not (tmp / "fake_191_out").exists()
+
+        custom = tmp / "custom.json"
+        dump_roster(custom, [
+            {"name": "丙", "role": "门店"},
+            {"name": "戊", "role": "门店"},
+            {"name": "庚", "role": "门店"},
+            {"name": "己", "role": "上门", "base_salary": 2500},
+        ])
+        out_custom = tmp / "custom_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(custom), "--out-dir", str(out_custom)])
+        assert rc == 0, err
+        custom_payload = json.loads((out_custom / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        ji_custom = person(custom_payload, "己")
+        assert ji_custom["base_salary"] == 0.0
+        assert ji_custom["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert "无底薪" in ji_custom["base_salary_source"]
+        assert ji_custom["gross"] == 125.0
+        assert_gross(ji_custom)
+        zero = {"name": "闲", "role": "门店", "base_salary": 2300}
+        dump_roster(tmp / "with_idle.json", [
+            {"name": "丙", "role": "门店"},
+            {"name": "戊", "role": "门店"},
+            {"name": "庚", "role": "门店"},
+            {"name": "己", "role": "上门"},
+            zero,
+        ])
+        out_idle = tmp / "idle_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(tmp / "with_idle.json"),
+                            "--out-dir", str(out_idle)])
+        assert rc == 0, err
+        idle_payload = json.loads((out_idle / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        idle = person(idle_payload, "闲")
+        assert idle["orders"] == 0 and idle["base_salary"] == 2300.0 and idle["gross"] == 2300.0
+        assert idle["base_breakdown"]["basic"] == 2300.0
+
+        trade_src = tmp / "trade.csv"
+        write_orders_ext(trade_src, [
+            ["T1", "石河子万达店", "到店", "已完成", "100", "2026-10-01 10:00:00", "官网", "8000", "上门甲", "O2O订单", "9000"],
+            ["T2", "石河子万达店", "上门", "已完成", "200", "2026-10-02 10:00:00", "官网", "5000", "上门甲", "上门订单", "6000"],
+            ["T3", "石河子万达店", "到店", "已完成", "50", "2026-10-03 10:00:00", "门店", "", "上门甲", "门店订单", "1000"],
+            ["T4", "石河子万达店", "到店", "已完成", " ", "2026-10-04 10:00:00", "门店", "4000", "上门甲", "门店订单", "4500"],
+            ["T5", "石河子万达店", "到店", "已完成", "10", "2026-10-05 10:00:00", "门店", "", "上门甲", "门店订单", ""],
+            ["T6", "石河子友谊商厦店", "到店", "已完成", "8", "2026-10-06 10:00:00", "门店", "", "门店乙", "门店订单", "10000"],
+            ["T7", "石河子友谊商厦店", "到店", "已完成", "1", "2026-10-07 10:00:00", "官网", "30000", "门店乙", "O2O订单", "30000"],
+        ])
+        trade_roster = tmp / "trade_roster.json"
+        dump_roster(trade_roster, [
+            {"name": "上门甲", "role": "上门", "base_salary": 2500},
+            {"name": "门店乙", "role": "门店"},
+        ])
+        exc_door = tmp / "exc_door.json"
+        exc_door.write_text(json.dumps({"上门甲": 9999}, ensure_ascii=False), encoding="utf-8")
+        out_trade = tmp / "trade_out"
+        rc, err = run(pay, ["--input", str(trade_src), "--month", "2026-10",
+                            "--active-roster", str(trade_roster),
+                            "--base-exceptions", str(exc_door),
+                            "--out-dir", str(out_trade)])
+        assert rc == 0, err
+        traded = json.loads((out_trade / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        shang = person(traded, "上门甲")
+        mendian = person(traded, "门店乙")
+        assert shang["base_salary"] == 0.0
+        assert shang["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert "无底薪" in shang["base_salary_source"]
+        assert shang["door_profit"] == 360.0 and shang["door_commission"] == 180.0
+        assert shang["online_orders"] == 0 and shang["online_amt"] == 0.0 and shang["online_commission"] == 0.0
+        assert shang["store_order_rows"] == 3
+        assert shang["store_amt_excl_rows"] == 1
+        assert shang["store_amt_fallback_rows"] == 1
+        assert shang["store_base_amt"] == 5000.0 and shang["store_commission"] == 200.0
+        assert "回退订单金额" in shang["store_amount_rule"]
+        assert mendian["door_commission"] == 0.0
+        assert mendian["online_commission"] == 300.0
+        assert mendian["store_base_amt"] == 30000.0 and mendian["store_commission"] == 900.0
+        assert mendian["store_amt_fallback_rows"] == 0
+        assert mendian["base_salary"] == 2000.0
+        trade_stores = traded["meta"]["store_tier_reference"]
+        assert trade_stores["石河子万达店"]["base_amt_excl_coupon"] == 17000.0
+        assert trade_stores["石河子友谊商厦店"]["base_amt_excl_coupon"] == 30000.0
+        assert trade_stores["石河子友谊商厦店"]["tier_rate_by_base"] == 0.03
+        assert_gross(shang)
+        assert_gross(mendian)
+        assert shang["gross"] == 380.0
+
+        calls = {"n": 0}
+
+        def employees(_env):
+            calls["n"] += 1
+            return [
+                {"person_name": "甲", "work_role": "上门", "base_salary": "1800",
+                 "employment_status": "在职"},
+                {"person_name": "乙", "work_role": "门店", "base_salary": None,
+                 "employment_status": "在职"},
+                {"person_name": "离职丙", "work_role": None, "base_salary": 2000,
+                 "employment_status": "离职"},
+            ]
+
+        out_emp = tmp / "emp_out"
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--roster-from", "employees", "--out-dir", str(out_emp)],
+                      fetcher=employees)
+        assert rc == 0, err
+        assert calls["n"] == 1
+        emp = json.loads((out_emp / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        assert emp["meta"]["caliber"]["roster"] == "employees"
+        emp_jia = person(emp, "甲")
+        emp_yi = person(emp, "乙")
+        assert emp_jia["role"] == "上门" and emp_jia["base_salary"] == 0.0
+        assert emp_jia["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert emp_jia["door_profit"] == 210.0 and emp_jia["door_commission"] == 105.0
+        assert emp_jia["online_commission"] == 0.0 and emp_jia["online_amt"] == 0.0
+        assert emp_jia["store_commission"] == 0.0
+        assert emp_yi["role"] == "门店" and emp_yi["base_salary"] == 2000.0
+        assert emp_yi["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
+        assert emp_yi["door_commission"] == 0.0
+        assert emp_yi["online_commission"] == 150.0
+        assert emp_yi["store_commission"] == 0.0
+        assert emp["meta"]["store_tier_reference"]["石河子友谊商厦店"]["store_role_door_excluded_amt"] == 10000.0
+        assert all(p["person"] != "离职丙" for p in emp["people"])
+        assert_gross(emp_jia)
+        assert_gross(emp_yi)
+
+        def missing_role(_env):
+            return [{"person_name": "甲", "work_role": "", "base_salary": 2000,
+                     "employment_status": "在职"}]
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--out-dir", str(tmp / "emp_bad")],
+                      env={"ROSTER_SOURCE": "employees"}, fetcher=missing_role)
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "work_role" in err
+        assert not (tmp / "emp_bad").exists()
+
+        def conflict_fetcher(_env):
+            raise AssertionError("来源冲突时不应读库")
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--roster-from", "json", "--active-roster", str(roster),
+                            "--out-dir", str(tmp / "conflict")],
+                      env={"ROSTER_SOURCE": "employees"}, fetcher=conflict_fetcher)
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "冲突" in err
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--roster-from", "employees", "--active-roster", str(roster),
+                            "--out-dir", str(tmp / "both")],
+                      fetcher=conflict_fetcher)
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+
+        example = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+        by_role = {}
+        for item in example["active"]:
+            assert item["role"] in ("上门", "门店")
+            assert item.get("base_salary", 2000) == 2000
+            by_role.setdefault(item["role"], set()).add(item["name"])
+            assert item["name"] not in pay.HARD_EXCLUDED
+        assert by_role["上门"] == {"张浩冉", "张静怡"}
+        assert by_role["门店"] == {"李冬浩", "刘市伟", "子拉兰", "王毅杰", "杜飞"}
+        ex_src = tmp / "example_orders.csv"
+        write_orders(ex_src, [
+            ["H1", "石河子万达店", "上门", "已完成", "200", "2026-10-08 10:00:00", "官网", "1000", "张浩冉"],
+            ["H2", "石河子万达店", "到店", "已完成", "10", "2026-10-08 11:00:00", "官网", "100", "吕文飞"],
+        ])
+        out_ex = tmp / "example_out"
+        rc, err = run(pay, ["--input", str(ex_src), "--month", "2026-10",
+                            "--active-roster", str(EXAMPLE), "--out-dir", str(out_ex)])
+        assert rc == 0, err
+        official = json.loads((out_ex / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        assert {p["person"] for p in official["people"]} == set().union(*by_role.values())
+        hao = person(official, "张浩冉")
+        jing = person(official, "张静怡")
+        du = person(official, "杜飞")
+        assert official["meta"]["store_tier_reference"]["石河子万达店"]["base_amt_excl_coupon"] == 1100.0
+        assert hao["role"] == "上门" and hao["base_salary"] == 0.0
+        assert hao["door_commission"] == 100.0 and hao["orders"] == 1
+        assert hao["online_commission"] == 0.0 and hao["store_commission"] == 0.0
+        assert jing["role"] == "上门" and jing["orders"] == 0 and jing["base_salary"] == 0.0
+        assert jing["gross"] == 0.0
+        assert jing["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert du["role"] == "门店" and du["orders"] == 0 and du["gross"] == 2000.0
+        assert all(p["person"] not in pay.HARD_EXCLUDED for p in official["people"])
+        excluded_names = {e["person"] for e in official["meta"]["active_roster"]["excluded"]}
+        assert "吕文飞" in excluded_names
+        assert_gross(hao)
+        assert_gross(du)
+
+        apply = load_apply()
+        out_buf = io.StringIO()
+
+        def forbid_write(_table, _rows):
+            raise AssertionError("dry-run 不应写库")
+
+        with redirect_stdout(out_buf):
+            code = apply.main(
+                ["--input", str(out_acc / "payroll_2026-10.json")],
+                env={}, writer=forbid_write, now=NOW)
+        assert code == 0, out_buf.getvalue()
+        assert "未写库" in out_buf.getvalue()
+        assert "dry-run" in out_buf.getvalue()
+
+        grabbed = {}
+
+        def grab(table, batch):
+            grabbed["table"] = table
+            grabbed["rows"] = batch
+            return len(batch)
+
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            code = apply.main(
+                ["--input", str(out_acc / "payroll_2026-10.json"), "--apply"],
+                env={apply.ENV_GATE: "true"}, writer=grab, now=NOW)
+        assert code == 0, out_buf.getvalue()
+        assert grabbed["table"] == "salary_realtime_draft"
+        ji_row = next(r for r in grabbed["rows"] if r["person_name"] == "己")
+        assert ji_row["base_amount"] == "0.00"
+        assert ji_row["accessories_amount"] == "450.00"
+        assert ji_row["door_amount"] == "125.00"
+        assert ji_row["online_amount"] == "0.00"
+        assert ji_row["store_amount"] == "0.00"
+        assert ji_row["gross_amount"] == "575.00"
+        assert "door=50|role=上门_all_profit" in ji_row["caliber"]
+        assert "door_store=4|trade=门店订单|amt=不含券_else_订单金额" in ji_row["caliber"]
+        assert "role" not in ji_row
+        assert set(ji_row) == set(apply.UPSERT_COLUMNS)
+        assert "30|source=" in ji_row["caliber"]
+
+    assert CONFIG.read_bytes() == cfg_before
+    print("smoke_online_mode PASS：上门角色无底薪、全分润×50%、无 online、"
+          "仅交易方式=门店订单×4%且不含券空回退订单金额；"
+          "门店角色 A1 保持；缺配件源为 0；缺 role 拒绝；"
+          "硬排除仅吕文飞/杨燕辉；dry-run 未写生产库。")
     return 0
 
 

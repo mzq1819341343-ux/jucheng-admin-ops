@@ -10,15 +10,15 @@
 ## 红线
 
 - `docs/fetch-pipeline/pipeline_config.json` 里 `UPLOAD` 与 `APPLY` 保持 false。`docs/fetch-pipeline/auto_fetch.py` 的 `ALLOW_UPLOAD_PHASE = False`，配置被改成 true 也不会上传。
-- 个人工资明细、姓名对应金额、密钥不入库。实时工资脚本的个人产物只写到本机 `--out-dir`。
+- 个人工资明细、姓名对应金额、密钥不入库。实时工资脚本的个人产物只写到本机 `--out-dir`。在职角色只保留 `scripts/payroll/active_roster.example.json` 这一份样例，不要复制到文档或算数脚本里。
 - 前端仓 `lib/realtime-payroll.ts` 的汇总数字保持基线上的指令194 原文。这次拆分没有改那个文件。
 
 ## 目录
 
 ```
-supabase/                 schema.sql、seed.sql、migration_002 … migration_011
+supabase/                 schema.sql、seed.sql、migration_002 … migration_013
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
-scripts/payroll/          实时工资草案（计算不连库）
+scripts/payroll/          实时工资草案（默认读 JSON 名单；employees 为可选只读）
 scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
 scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
@@ -27,7 +27,7 @@ scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 ## Supabase 初始化（一次性）
 
 1. 在 Supabase 新建项目。
-2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。`migration_011_salary_realtime_draft.sql` 是已在当前线上库落库的过关稿归档，本仓不代执行。脚本默认不连库。
+2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。`migration_011_salary_realtime_draft.sql`、`migration_012_employees.sql`、`migration_013_salary_rules_accessories_pct.sql` 都是当前线上库已经执行过的归档，本仓不代执行、不在变更里重跑。脚本默认不连库。
 3. Settings → API 复制 Project URL 与 anon public key，填到前端仓 `.env.local`（模板在该仓 `.env.example`）。service role key 只留在服务端，不要加 `NEXT_PUBLIC_` 前缀，也不要提交。
 
 ## 抓数管道
@@ -47,10 +47,13 @@ python3 scripts/payroll/realtime_payroll.py \
   --input <本机原生导出.xlsx> \
   --month 2026-10 \
   --active-roster <本机在职名单.json> \
+  --accessories-input <本机配件导出.csv> \
   --out-dir <本机目录>
 ```
 
-标准输出只打印汇总锚点。个人清单留在 `--out-dir`，不要提交。前端人效卡读 web 仓 `lib/realtime-payroll.ts`。在月结校准合并之前不要改那些汇总数。
+名单 JSON 里每人要有 `role`（上门或门店），可省略 `base_salary`（门店角色缺省 2000；上门角色算数时底薪强制 0）。缺 role 拒绝出草案。上门角色拿名下全部订单分润的 50%，不进线上；其门店提成只计交易方式为「门店订单」的金额（不含券为空则用订单金额）× 固定 4%。没给 `--accessories-input` 或文件不存在时配件提成为 0，并在 assumptions 注明；不要把旧机订单列当成配件。可选只读在职表：`--roster-from=employees`（或 `ROSTER_SOURCE=employees`），只 GET `employment_status=在职` 的 `work_role` 与 `base_salary`，不写库。当前在职样例是 `scripts/payroll/active_roster.example.json`，不要把名单再复制进别的文件。
+
+标准输出只打印汇总锚点。个人清单留在 `--out-dir`，不要提交。前端人效卡读 web 仓 `lib/realtime-payroll.ts`。在月结校准合并之前不要改那些汇总数。口径说明见 `docs/工资字段映射_新口径.md`。
 
 把这份 JSON upsert 进 `salary_realtime_draft`：
 
@@ -97,4 +100,4 @@ node scripts/salary-promotion/dry-run.mjs
 node scripts/salary-promotion/verify-expectations.mjs
 ```
 
-字段口径对照见 `docs/工资字段映射_192.md`。
+字段口径对照见 `docs/工资字段映射_新口径.md`（192 为旧定案历史）。

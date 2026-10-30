@@ -53,6 +53,7 @@ def payload(month="2026-10", people=None, effective_from="2026-10"):
     if people is None:
         people = [{
             "person": "示例甲",
+            "role": "上门",
             "base_salary": "2000.00",
             "door_commission": "10.50",
             "online_commission": "1.00",
@@ -189,6 +190,31 @@ def main():
     assert code == 3 and len(cap.calls) == 1
 
     assert CONFIG_PATH.read_bytes() == cfg_before
+
+    tagged = payload()
+    tagged["meta"]["caliber"] = {
+        "online_mode": "source_not_门店+store_role_door_as_online",
+        "door_profit_pct": "50|role=上门_all_profit",
+        "door_role_store_pct": "4|trade=门店订单|amt=不含券_else_订单金额",
+        "accessories_pct": "30|source=none",
+        "roster": "json",
+    }
+    tagged["meta"]["active_roster"] = {"source": "json", "active": []}
+    tagged["people"][0]["accessories_commission"] = "3.00"
+    tagged["people"][0]["gross"] = "2016.50"
+    cap2 = Capture()
+    code, out, _err = run(mod, tagged, True, {mod.ENV_GATE: "true"}, cap2)
+    assert code == 0 and len(cap2.calls) == 1
+    tagged_row = cap2.calls[0][1][0]
+    assert tagged_row["accessories_amount"] == "3.00"
+    assert tagged_row["gross_amount"] == "2016.50"
+    assert "role" not in tagged_row
+    assert "online_caliber=source_not_门店+store_role_door_as_online" in tagged_row["caliber"]
+    assert "door=50|role=上门_all_profit" in tagged_row["caliber"]
+    assert "door_store=4|trade=门店订单|amt=不含券_else_订单金额" in tagged_row["caliber"]
+    assert "accessories=30|source=none" in tagged_row["caliber"]
+    assert "roster=json" in tagged_row["caliber"]
+    assert cap2.calls[0][0] == "salary_realtime_draft"
 
     # 双闸开齐但没有库凭据：失败退出，且不使用调用方环境里的密钥
     code, out, err = run(mod, payload(), True, {mod.ENV_GATE: "true"}, None)
