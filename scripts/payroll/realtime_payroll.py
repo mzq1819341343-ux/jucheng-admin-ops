@@ -5,15 +5,21 @@
 口径（产品拍板 A1 / B1 / C 过渡 JSON / D，与 docs/工资字段映射_新口径.md 一致）：
   - 名单每人必须有 role ∈ {上门, 门店}。缺 role、仅姓名列表、或根本没给名单
     → 拒绝出草案（退出码 4），禁止默认角色。
-  - role=上门 且 取货方式=上门：分润 × 50% → door。
+  - role=上门：底薪强制 0（名单或 employees 写成 2000 也不采用）。
+    名下全部订单的分润合计 ×50% → door，不再要求取货方式=上门。
+    上门角色的订单不进 online。
+    门店提成只计交易方式精确等于「门店订单」的金额 × 固定 4%（不用店阶梯）。
+    金额优先「订单金额（不含券）」，该列为空则回退「订单金额」。
+    O2O订单、上门订单及其它交易方式不进这 4%。
   - role=门店 且 取货方式=上门：不含券金额 → online（×1%），不进 door，
-    不进门店阶梯基数，也不进该人的门店份额。
-  - 来源类型 ≠ 门店 仍 ×1%（ONLINE_MODE=source_not_门店，不改）。
-  - 门店阶梯仍按不含券定档：≥60000→4%，≥30000→3%，否则 0。
+    不进门店阶梯基数，也不进该人的门店份额。底薪仍按名单，缺省 2000。
+  - 来源类型 ≠ 门店 仍 ×1%，但只对门店角色（ONLINE_MODE=source_not_门店，不改）。
+  - 门店阶梯仍按不含券定档：≥60000→4%，≥30000→3%，否则 0。只用于门店角色。
     不在名单上的订单仍计入全店定档（指令193），不计入个人份额。
+    上门角色的「订单金额」回退额不进阶梯基数。
   - 配件 = 实付 × 30%（ACCESSORIES_PCT）。--accessories-input 缺文件则该项为 0
     并在 assumptions 注明。禁止用旧机 191 列冒充配件。
-  - 底薪取名单 base_salary，缺省 2000（基础 1000 + 全勤 500 + 拉新 500）。
+  - 门店角色底薪取名单 base_salary，缺省 2000（基础 1000 + 全勤 500 + 拉新 500）。
     与 2000 不同的自定义底薪整笔记入 basic，全勤/拉新 = 0。
   - gross = base + door + online + store + accessories。
 
@@ -40,6 +46,7 @@ JSON 形状（不接受字符串姓名；示例用假名，不是在职名单）
     "excluded": [{"person": "示例丙", "reason": "离职"}]
   }
   name 与 person_name 二选一。base_salary 可省略。
+  role=上门 时算数强制底薪 0，JSON 里的 2000 不会进应发。
 
 用法：
   python3 scripts/payroll/realtime_payroll.py \\
@@ -81,8 +88,12 @@ ONLINE_MODE = "source_not_门店"
 STORE_TIERS = [(Decimal("60000"), Decimal("0.04")),
                (Decimal("30000"), Decimal("0.03"))]
 STORE_BASE_FIELD = "订单金额（不含券）"
+ORDER_AMOUNT_FIELD = "订单金额"
+TRADE_FIELD = "交易方式"
+TRADE_STORE_ORDER = "门店订单"
 ACCESSORIES_PCT = Decimal("0.30")  # 实付 × 30%。废止 accessories_tiers。
 DOOR_PROFIT_PCT = Decimal("0.50")
+DOOR_ROLE_STORE_PCT = Decimal("0.04")  # 上门角色：交易方式=门店订单 × 固定 4%
 ROLES = ("上门", "门店")
 
 STORE_IDS = {"石河子万达店": "4594", "石河子友谊商厦店": "5511"}
@@ -455,6 +466,10 @@ def load_accessories(path, month, af):
 
 
 def base_view(person, roster, exceptions):
+    if roster[person]["role"] == "上门":
+        zero = Decimal("0")
+        return zero, {"basic": zero, "attendance": zero, "new_customer": zero}, (
+            "上门角色无底薪（名单、employees 上的 base_salary 与 --base-exceptions 均不采用）")
     if person in exceptions:
         base = money(exceptions[person])
         return base, {"basic": base, "attendance": Decimal("0"), "new_customer": Decimal("0")}, (
@@ -550,7 +565,12 @@ def main(argv=None, env=None, employees_fetcher=None):
         "door_orders": 0, "door_profit": Decimal("0"),
         "online_orders": 0, "online_amt": Decimal("0"),
         "store_base": Decimal("0"),
-        "stores": defaultdict(lambda: {"orders": 0, "base_amt": Decimal("0")}),
+        "store_fixed_amt": Decimal("0"),
+        "store_fixed_orders": 0,
+        "store_amt_fallback_rows": 0,
+        "store_amt_excl_rows": 0,
+        "stores": defaultdict(lambda: {
+            "orders": 0, "base_amt": Decimal("0"), "fixed_amt": Decimal("0")}),
     })
     for name in roster:
         agg[name]["role"] = roster[name]["role"]
@@ -588,22 +608,38 @@ def main(argv=None, env=None, employees_fetcher=None):
         a["stores"][store]["orders"] += 1
         if amt is None:
             a["base_amt_missing"] += 1
-        elif not store_role_door:
+        elif role != "上门" and not store_role_door:
             a["store_base"] += amt
             a["stores"][store]["base_amt"] += amt
         if profit is None:
             a["profit_missing"] += 1
         else:
             a["profit"] += profit
-        if door_pickup:
-            a["door_orders"] += 1
-            if role == "上门" and profit is not None:
+        if role == "上门":
+            # 全部分润进 door；不进 online。门店提成只认交易方式=门店订单。
+            if profit is not None:
                 a["door_profit"] += profit
-        enters_online = store_role_door or online_src
-        if enters_online:
-            a["online_orders"] += 1
-            if amt is not None:
-                a["online_amt"] += amt
+                a["door_orders"] += 1
+            if g(r, TRADE_FIELD) == TRADE_STORE_ORDER:
+                a["store_fixed_orders"] += 1
+                if amt is not None:
+                    pay_amt = amt
+                    a["store_amt_excl_rows"] += 1
+                else:
+                    pay_amt = num(r, ORDER_AMOUNT_FIELD)
+                    if pay_amt is not None:
+                        a["store_amt_fallback_rows"] += 1
+                if pay_amt is not None:
+                    a["store_fixed_amt"] += pay_amt
+                    a["stores"][store]["fixed_amt"] += pay_amt
+        else:
+            if door_pickup:
+                a["door_orders"] += 1
+            enters_online = store_role_door or online_src
+            if enters_online:
+                a["online_orders"] += 1
+                if amt is not None:
+                    a["online_amt"] += amt
 
     for store in store_count:
         store_base.setdefault(store, Decimal("0"))
@@ -622,23 +658,38 @@ def main(argv=None, env=None, employees_fetcher=None):
     people = []
     for person in sorted(roster, key=lambda n: (-agg[n]["orders"], n)):
         a = agg[person]
-        store_comm = sum(
-            (a["stores"][s]["base_amt"] * store_rate.get(s, Decimal("0")) for s in a["stores"]),
-            Decimal("0"))
+        role = roster[person]["role"]
+        if role == "上门":
+            store_comm_m = money(a["store_fixed_amt"] * DOOR_ROLE_STORE_PCT)
+            store_base_out = a["store_fixed_amt"]
+            online_comm = Decimal("0")
+            store_rule = "交易方式=门店订单×固定4%；不含券空则回退订单金额"
+            stores_out = {s: {"store_id": STORE_IDS.get(s, ""),
+                              "orders": a["stores"][s]["orders"],
+                              "base_amt": float(money(a["stores"][s]["fixed_amt"])),
+                              "tier_rate": float(DOOR_ROLE_STORE_PCT)}
+                          for s in a["stores"]}
+        else:
+            store_comm = sum(
+                (a["stores"][s]["base_amt"] * store_rate.get(s, Decimal("0")) for s in a["stores"]),
+                Decimal("0"))
+            store_comm_m = money(store_comm)
+            store_base_out = a["store_base"]
+            online_comm = money(a["online_amt"] * ONLINE_PCT)
+            store_rule = "不含券×所在店阶梯；上门取货不进基数"
+            stores_out = {s: {"store_id": STORE_IDS.get(s, ""),
+                              "orders": a["stores"][s]["orders"],
+                              "base_amt": float(money(a["stores"][s]["base_amt"])),
+                              "tier_rate": float(store_rate.get(s, Decimal("0")))}
+                          for s in a["stores"]}
         base, bd, base_source = base_view(person, roster, exceptions)
         door_comm = money(a["door_profit"] * DOOR_PROFIT_PCT)
-        online_comm = money(a["online_amt"] * ONLINE_PCT)
-        store_comm_m = money(store_comm)
         acc_paid = accessory_paid.get(person, Decimal("0"))
         acc_comm = money(acc_paid * ACCESSORIES_PCT)
         row = {
             "person": person,
-            "role": roster[person]["role"],
-            "stores": {s: {"store_id": STORE_IDS.get(s, ""),
-                           "orders": a["stores"][s]["orders"],
-                           "base_amt": float(money(a["stores"][s]["base_amt"])),
-                           "tier_rate": float(store_rate.get(s, Decimal("0")))}
-                       for s in a["stores"]},
+            "role": role,
+            "stores": stores_out,
             "orders": a["orders"],
             "base_salary": float(money(base)),
             "base_breakdown": {k: float(money(v)) for k, v in bd.items()},
@@ -646,11 +697,15 @@ def main(argv=None, env=None, employees_fetcher=None):
             "door_orders": a["door_orders"],
             "door_profit": float(money(a["door_profit"])),
             "door_commission": float(door_comm),
-            "online_orders": a["online_orders"],
-            "online_amt": float(money(a["online_amt"])),
+            "online_orders": 0 if role == "上门" else a["online_orders"],
+            "online_amt": 0.0 if role == "上门" else float(money(a["online_amt"])),
             "online_commission": float(online_comm),
-            "store_base_amt": float(money(a["store_base"])),
+            "store_base_amt": float(money(store_base_out)),
             "store_commission": float(store_comm_m),
+            "store_amount_rule": store_rule,
+            "store_order_rows": a["store_fixed_orders"],
+            "store_amt_excl_rows": a["store_amt_excl_rows"],
+            "store_amt_fallback_rows": a["store_amt_fallback_rows"],
             "accessories_paid": float(money(acc_paid)),
             "accessories_commission": float(acc_comm),
             "accessories_note": accessory_meta["note"],
@@ -671,21 +726,27 @@ def main(argv=None, env=None, employees_fetcher=None):
         return EXIT_HARD_EXCLUDED
 
     assumptions = [
-        "线上提成【已拍板 A1】：来源类型≠门店（ONLINE_MODE=source_not_门店）的不含券×1%；"
+        "线上提成【门店角色】：来源类型≠门店（ONLINE_MODE=source_not_门店）的不含券×1%；"
         "另：role=门店且取货方式=上门的不含券也按线上×1%"
-        "（online_mode=source_not_门店+store_role_door_as_online）。不与上门 50% 双计",
-        "上门提成【已拍板 A1】：仅 role=上门 且取货方式=上门的分润×50%"
-        "（door_profit_pct=50|role=上门_only）。role=门店的上门单不进 door",
-        "门店提成【已拍板】：不含券按店定档（≥60000→4%，≥30000→3%，否则 0%）。"
+        "（online_mode=source_not_门店+store_role_door_as_online|door_role_no_online）。"
+        "role=上门的订单不进 online",
+        "上门提成【上门角色】：名下全部订单的分润合计×50%"
+        "（door_profit_pct=50|role=上门_all_profit），不限取货方式。"
+        "role=门店不进 door。底薪强制 0",
+        "上门角色的门店提成：仅交易方式=门店订单。"
+        "金额优先订单金额（不含券），为空则回退订单金额，合计×固定4%"
+        "（不用店阶梯）。O2O订单、上门订单及其它交易方式不计入。"
+        "回退用的订单金额不进门店阶梯基数",
+        "门店角色的门店提成【A1】：不含券按店定档（≥60000→4%，≥30000→3%，否则 0%）。"
         "role=门店的上门单不进阶梯基数、不进个人门店份额。"
         "不在名单上的订单仍计入定档，不进个人份额",
         "配件提成【已拍板 B1/D】：实付×30%（accessories_pct=30），废止 accessories_tiers。"
         + accessory_meta["note"],
-        "底薪：名单 base_salary，缺省 2000（基础1000+全勤500+拉新500）。"
-        "与缺省不同的自定义底薪整笔记入 basic，全勤/拉新=0。"
-        "--base-exceptions 仍为非现行覆盖",
+        "底薪：role=上门强制 0。role=门店取名单 base_salary，缺省 2000"
+        "（基础1000+全勤500+拉新500）。与缺省不同的自定义底薪整笔记入 basic，全勤/拉新=0。"
+        "--base-exceptions 只可能覆盖门店角色，不覆盖上门角色",
         "在职名单每人必须有 role∈{上门,门店}。缺 role、仅姓名列表或未提供名单则拒绝出草案，不默认角色。"
-        "零单在职人员仍出底薪行",
+        "零单在职人员仍出一行：上门底薪为 0，门店为名单底薪",
         "硬排除仅吕文飞、杨燕辉。张浩冉、张静怡已移出硬排除，出现在计薪名单不再因此中止",
         "分润金额或实付金额为空的行按缺失不补值，不计入对应基数",
         "gross = base + door + online + store + accessories",
@@ -714,8 +775,10 @@ def main(argv=None, env=None, employees_fetcher=None):
         "note_partial_month": "输入为月中导出（完成时间截至导出时刻），非整月终数",
         "online_mode": ONLINE_MODE,
         "caliber": {
-            "online_mode": "source_not_门店+store_role_door_as_online",
-            "door_profit_pct": "50|role=上门_only",
+            "online_mode": "source_not_门店+store_role_door_as_online|door_role_no_online",
+            "door_profit_pct": "50|role=上门_all_profit",
+            "door_role_base": "0",
+            "door_role_store_pct": "4|trade=门店订单|amt=不含券_else_订单金额",
             "accessories_pct": accessory_meta["pct"],
             "roster": roster_source,
         },
@@ -780,9 +843,9 @@ def main(argv=None, env=None, employees_fetcher=None):
     with open(out_dir / ("payroll_%s.csv" % month), "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["月份", "验货人", "角色", "单量", "底薪", "基础", "全勤", "拉新",
-                    "上门单量", "上门分润(仅上门角色)", "上门提成(50%·仅上门角色)",
+                    "分润计入单量", "分润基数", "上门提成(50%·上门角色全部订单)",
                     "线上单量", "线上金额(不含券)", "线上提成(1%)",
-                    "门店提成基数(不含券)", "门店提成", "配件实付", "配件提成(实付×30%)",
+                    "门店提成基数", "门店提成", "配件实付", "配件提成(实付×30%)",
                     "分润合计", "应发草案合计", "分润缺失行", "不含券缺失行"])
         for p in people:
             w.writerow([month, p["person"], p["role"], p["orders"], p["base_salary"],
@@ -794,9 +857,10 @@ def main(argv=None, env=None, employees_fetcher=None):
                         p["gross"], p["profit_missing_rows"], p["base_amt_missing_rows"]])
 
     print("输入 %d 行 → 月份 %s 内 %d 行（月外 %d 行）" % (len(rows), month, len(in_month), out_month))
-    print("线上口径 ONLINE_MODE=%s；另：role=门店且取货方式=上门 的不含券也×1%%，不进门店阶梯"
-          % ONLINE_MODE)
-    print("上门口径：仅 role=上门 的取货上门分润×50%。底薪缺省 2000，名单可自定义")
+    print("线上口径 ONLINE_MODE=%s；role=门店且取货方式=上门 的不含券也×1%%，不进门店阶梯。"
+          "role=上门不进线上" % ONLINE_MODE)
+    print("上门角色：无底薪；全部订单分润×50%；仅交易方式=门店订单×固定4%"
+          "（不含券空则回退订单金额）。门店角色底薪缺省 2000")
     print("名单来源 %s；单量锚点 PASS：计薪单量 %d + 排除单量 %d == 月内行数 %d"
           % (roster_source, total_orders, excluded_orders, len(in_month)))
     for s in sorted(store_count):

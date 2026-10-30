@@ -51,7 +51,7 @@ python3 scripts/payroll/realtime_payroll.py \
   --out-dir <本机目录>
 ```
 
-名单 JSON 里每人要有 `role`（上门或门店），可省略 `base_salary`（缺省 2000）。缺 role 拒绝出草案。没给 `--accessories-input` 或文件不存在时配件提成为 0，并在 assumptions 注明；不要把旧机订单列当成配件。可选只读在职表：`--roster-from=employees`（或 `ROSTER_SOURCE=employees`），只 GET `employment_status=在职` 的 `work_role` 与 `base_salary`，不写库。当前在职样例是 `scripts/payroll/active_roster.example.json`，不要把名单再复制进别的文件。
+名单 JSON 里每人要有 `role`（上门或门店），可省略 `base_salary`（门店角色缺省 2000；上门角色算数时底薪强制 0）。缺 role 拒绝出草案。上门角色拿名下全部订单分润的 50%，不进线上；其门店提成只计交易方式为「门店订单」的金额（不含券为空则用订单金额）× 固定 4%。没给 `--accessories-input` 或文件不存在时配件提成为 0，并在 assumptions 注明；不要把旧机订单列当成配件。可选只读在职表：`--roster-from=employees`（或 `ROSTER_SOURCE=employees`），只 GET `employment_status=在职` 的 `work_role` 与 `base_salary`，不写库。当前在职样例是 `scripts/payroll/active_roster.example.json`，不要把名单再复制进别的文件。
 
 标准输出只打印汇总锚点。个人清单留在 `--out-dir`，不要提交。前端人效卡读 web 仓 `lib/realtime-payroll.ts`。在月结校准合并之前不要改那些汇总数。口径说明见 `docs/工资字段映射_新口径.md`。
 

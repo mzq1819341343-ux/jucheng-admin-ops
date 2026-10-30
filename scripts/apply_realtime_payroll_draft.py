@@ -129,6 +129,9 @@ def build_caliber(meta):
     door = str(cal.get("door_profit_pct") or "")
     if door:
         extra.append("door=%s" % door)
+    door_store = str(cal.get("door_role_store_pct") or "")
+    if door_store:
+        extra.append("door_store=%s" % door_store)
     acc = str(cal.get("accessories_pct") or "")
     if acc:
         extra.append("accessories=%s" % acc)

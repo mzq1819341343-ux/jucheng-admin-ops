@@ -194,7 +194,8 @@ def main():
     tagged = payload()
     tagged["meta"]["caliber"] = {
         "online_mode": "source_not_门店+store_role_door_as_online",
-        "door_profit_pct": "50|role=上门_only",
+        "door_profit_pct": "50|role=上门_all_profit",
+        "door_role_store_pct": "4|trade=门店订单|amt=不含券_else_订单金额",
         "accessories_pct": "30|source=none",
         "roster": "json",
     }
@@ -209,7 +210,8 @@ def main():
     assert tagged_row["gross_amount"] == "2016.50"
     assert "role" not in tagged_row
     assert "online_caliber=source_not_门店+store_role_door_as_online" in tagged_row["caliber"]
-    assert "door=50|role=上门_only" in tagged_row["caliber"]
+    assert "door=50|role=上门_all_profit" in tagged_row["caliber"]
+    assert "door_store=4|trade=门店订单|amt=不含券_else_订单金额" in tagged_row["caliber"]
     assert "accessories=30|source=none" in tagged_row["caliber"]
     assert "roster=json" in tagged_row["caliber"]
     assert cap2.calls[0][0] == "salary_realtime_draft"
