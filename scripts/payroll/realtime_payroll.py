@@ -6,10 +6,18 @@
 
 规则来源：public.salary_rules「通用工资体系（老板口述版）」一行
 （supabase/migration_004_contracts_rules.sql 种子的 commission_rules JSON），
-本脚本常量与其逐项镜像，改规则须两处同步。
+本脚本常量与其逐项镜像，改规则须两处同步：
+  base_salary 2000 = basic 1000 + attendance 500 + new_customer 500
+  online_order_pct 1 → ONLINE_PCT（百分数 1 = 0.01）
+  store_tiers ≥30000→3% / ≥60000→4%（阶梯取最高达成档）
+  door_profit_pct 50 → DOOR_PROFIT_PCT
+  accessories_tiers 保留；无配件数据时提成占位 0
+commission_rules 只有 online_order_pct，没有「线上订单 / 门店业绩」的列定义。
+线上判定不改种子、不跑 migration，锁在本文件 ONLINE_MODE（老板 2026-10-29 拍板）。
 EFFECTIVE_FROM 对应 salary_rules.effective_from：老板 2026-10-28 拍板 = 2026-10；
 库内落地材料 = supabase/migration_010_salary_effective_from.sql（老板在 SQL Editor
 执行一次即可，本脚本不连库、不写库）。
+乱码：库侧无证据，本脚本不改编码处理（读入仍走 auto_fetch 既有识别，不新增转码）。
 
 用法：
   python3 scripts/payroll/realtime_payroll.py \
@@ -22,9 +30,10 @@ EFFECTIVE_FROM 对应 salary_rules.effective_from：老板 2026-10-28 拍板 = 2
     --month 2026-10 \
     --active-roster ~/Desktop/05_Muse督工/payroll_193/active_roster_2026-10.json \
     --out-dir ~/Desktop/05_Muse督工/payroll_193/
-  不带 --active-roster 时计算口径与 192 一致（不过滤），但硬断言仍然生效：
+  不带 --active-roster 时不过滤人员，但硬断言仍然生效：
   只要计薪结果含张浩冉/张静怡/杨燕辉/吕文飞任一人即报错中止（退出码 3）——
   193 之后不带名单的「全员应发草案」不再可出，防误用。
+  线上口径已是 source_not_门店，与 192 当时「仅来源类型=官网」不同。
 
 输出（个人级，仅落 --out-dir 指定目录，禁止入仓/外传）：
   payroll_<month>.json / payroll_<month>.csv
@@ -32,20 +41,23 @@ EFFECTIVE_FROM 对应 salary_rules.effective_from：老板 2026-10-28 拍板 = 2
   并在 payroll JSON 的 meta.active_roster 与 totals 中同步汇总。
 stdout 只打印汇总锚点（总单量/分店单量/人数/各项合计），不打印个人清单。
 
-计算口径与假设（与 docs/工资字段映射_192.md 一致，假设均标【假设·待老板确认】）：
+计算口径（与 docs/工资字段映射_192.md 一致；H1/H2/底薪均为【已拍板】）：
   - 人员归属主字段 = 门店验货人。
   - 上门提成 = 个人「取货方式=上门」订单分润金额合计 × 50%（规则原文「卖出机子
     利润」即分润金额；分润为空的行按缺失不补值，该单不计入基数）。
-  - 线上提成【假设】= 来源类型=「官网」的订单，其「订单金额（不含券）」合计 × 1%
-    （191 样本中官网来源 78 单该列全非空，可识别可复算；对照口径 交易方式=
-    「O2O订单」90 单的合计在映射表中并列，待老板选定后改常量 ONLINE_MODE）。
-  - 门店提成【假设】业绩基数 = 「订单金额（不含券）」：先按门店汇总当月基数定档
+  - 线上提成【已拍板】= 来源类型 ≠「门店」的订单，其「订单金额（不含券）」合计 × 1%
+    （BD、官网及其他非门店来源都算线上；空来源也 ≠ 门店，计入线上）。
+    门店业绩的仓内字段定义 = orders37「来源类型」等于「门店」。
+    「是否门店订单」/「交易方式=门店订单」是另一刀，映射表标为不用/对照，不采用。
+    旧口径 ONLINE_MODE=source_官网（只认来源类型=官网）已废止，写回该值会直接报错。
+  - 门店提成【已拍板】业绩基数 = 「订单金额（不含券）」：先按门店汇总当月基数定档
     （≥60000→4%，≥30000→3%，未达 30000→0%，取最高达成档），个人提成 =
-    Σ（个人在该店的基数 × 该店档位率）；分润基数的档位对照同步输出在 JSON
-    的 store_tier_reference 段（本轮两基数档位不同，待老板确认基数）。
+    Σ（个人在该店的基数 × 该店档位率）。基数范围含全部来源（含来源类型=门店），
+    与线上提成不是互斥切分：非门店来源的不含券同时进入线上 1% 与门店阶梯基数。
+    分润基数只作对照，写在 JSON 的 store_tier_reference，不参与定档。
   - 配件提成 = 0 占位：191 订单明细无配件销售数据，未从 191 取得，不编造。
-  - 底薪 = 2000（基础 1000 + 全勤 500 + 拉新 500）全员默认；仓内/历史材料未查到
-    个人底薪例外配置，如老板给出例外表，用 --base-exceptions <json> 注入。
+  - 底薪【已拍板】= 2000（基础 1000 + 全勤 500 + 拉新 500）全员统一。
+    不做 1–9 月个人例外。--base-exceptions 保留为非现行路径，缺省不读、不注入。
 金额一律 Decimal；订单编号不参与计算；中文 UTF-8。
 """
 
@@ -65,11 +77,12 @@ EFFECTIVE_FROM = "2026-10"
 BASE_SALARY = Decimal("2000")
 BASE_BREAKDOWN = {"basic": Decimal("1000"), "attendance": Decimal("500"),
                   "new_customer": Decimal("500")}
-ONLINE_PCT = Decimal("0.01")          # 线上订单提成 1%
-ONLINE_MODE = "source_官网"           # 【假设】线上单判定口径，见模块 docstring
+ONLINE_PCT = Decimal("0.01")          # 线上订单提成 1%（salary_rules.online_order_pct）
+# 【已拍板】除来源类型=门店外一律算线上。旧值 source_官网 已废止，见 is_online_source。
+ONLINE_MODE = "source_not_门店"
 STORE_TIERS = [(Decimal("60000"), Decimal("0.04")),
-               (Decimal("30000"), Decimal("0.03"))]  # 取最高达成档，未达最低档 = 0
-STORE_BASE_FIELD = "订单金额（不含券）"  # 【假设】门店提成绩效基数
+               (Decimal("30000"), Decimal("0.03"))]  # 【已拍板】取最高达成档，未达最低档 = 0
+STORE_BASE_FIELD = "订单金额（不含券）"  # 【已拍板】门店提成绩效基数
 ACCESSORIES_TIERS = [(Decimal("10000"), Decimal("0.40")),
                      (Decimal("6500"), Decimal("0.30")),
                      (None, Decimal("0.20"))]  # 本轮无数据源，占位 0
@@ -119,6 +132,19 @@ def tier_rate(base):
     return Decimal("0")
 
 
+def is_online_source(source_type):
+    """线上单判定。现行唯一口径：来源类型去掉空白后不等于「门店」。
+
+    空来源、BD、官网及其他任何非门店来源都算线上。ONLINE_MODE 锁死为
+    source_not_门店；旧值 source_官网 不再保留分支，避免静默退回「只认官网」。
+    """
+    if ONLINE_MODE != "source_not_门店":
+        raise RuntimeError(
+            "ONLINE_MODE=%r 未锁定。现行唯一合法值是 source_not_门店"
+            "（旧值 source_官网 已废止，不得作为可切换口径）" % (ONLINE_MODE,))
+    return str(source_type).strip() != "门店"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="实时工资草案（orders37 + salary_rules 口径）")
     ap.add_argument("--input", required=True, help="加盟商后台原生导出（xlsx/csv）")
@@ -127,7 +153,8 @@ def main(argv=None):
     ap.add_argument("--source-label", default="orders37/191",
                     help="数据来源标注（写入草案 meta）")
     ap.add_argument("--base-exceptions", default=None,
-                    help="可选：个人底薪例外 JSON {姓名: 底薪}，本轮未提供 = 全员默认")
+                    help="非现行路径：老板定案底薪全员统一 2000，不做 1–9 月个人例外。"
+                         "本参数仅保留供历史对照，缺省不读取、不改变现行默认")
     ap.add_argument("--active-roster", default=None,
                     help="可选（指令193）：在职名单 JSON {active:[姓名], excluded:[{person, reason}]}；"
                          "非名单人员不计薪，订单汇入 excluded 输出；缺省 = 不过滤（计算口径同 192，"
@@ -158,6 +185,9 @@ def main(argv=None):
 
     exceptions = {}
     if args.base_exceptions:
+        print("警告：本跑注入了 --base-exceptions（非现行路径）。"
+              "老板定案底薪全员统一 2000，不做 1–9 月个人例外；"
+              "本文件不得当作现行应发。", file=sys.stderr)
         exceptions = {k: Decimal(str(v)) for k, v in
                       json.loads(Path(args.base_exceptions).read_text(encoding="utf-8")).items()}
 
@@ -240,7 +270,7 @@ def main(argv=None):
             a["door_orders"] += 1
             if p is not None:
                 a["door_profit"] += p
-        if g(r, "来源类型") == "官网":  # ONLINE_MODE = source_官网
+        if is_online_source(g(r, "来源类型")):  # ONLINE_MODE = source_not_门店
             a["online_orders"] += 1
             if v is not None:
                 a["online_amt"] += v
@@ -268,7 +298,10 @@ def main(argv=None):
             "orders": a["orders"],
             "base_salary": float(money(base)),
             "base_breakdown": {k: float(money(v)) for k, v in bd.items()},
-            "base_salary_source": "个人例外" if person in exceptions else "默认2000（未查到个人例外配置）",
+            "base_salary_source": (
+                "个人例外（非现行路径，--base-exceptions 注入；老板定案不做例外）"
+                if person in exceptions else
+                "统一2000（已拍板：基础1000+全勤500+拉新500，不做1–9月个人例外）"),
             "door_orders": a["door_orders"],
             "door_profit": float(money(a["door_profit"])),
             "door_commission": float(door_comm),
@@ -309,12 +342,14 @@ def main(argv=None):
         "rows_in_month": len(in_month),
         "rows_out_of_month": out_month,
         "note_partial_month": "输入为月中导出（完成时间截至导出时刻），非整月终数",
+        "online_mode": ONLINE_MODE,
         "assumptions": [
-            "线上提成口径【假设·待老板确认】：来源类型=官网 的订单金额（不含券）×1%",
-            "门店提成绩效基数【假设·待老板确认】：订单金额（不含券），按门店合计定档，个人按所在店基数×该店档位率（未达3万档位率0）",
+            "线上提成口径【已拍板】：来源类型≠门店（BD/官网及其他非门店来源，含空来源）的订单金额（不含券）×1%；旧口径「仅来源类型=官网」已废止",
+            "门店提成绩效基数【已拍板】：订单金额（不含券），按门店合计定档（≥60000→4%，≥30000→3%，未达→0%），个人按所在店基数×该店档位率",
             "配件提成占位0：191 无配件销售数据，未从191取得",
-            "底薪全员默认2000（基础1000+全勤500+拉新500）：未查到个人底薪例外配置",
+            "底薪全员统一2000（基础1000+全勤500+拉新500）【已拍板】：不做1–9月个人例外；--base-exceptions 非现行路径，缺省不注入",
             "分润金额为空的行按缺失不补值，不计入上门/分润基数（延续既有口径）",
+            "上门提成【维持】：取货方式=上门的分润金额×50%",
         ],
         "store_tier_reference": {
             s: {"store_id": STORE_IDS.get(s, ""),
@@ -335,10 +370,14 @@ def main(argv=None):
         "accessories_commission_total": 0.0,
         "gross_total": float(money(sum(Decimal(str(p["gross"])) for p in people))),
     }
+    if exceptions:
+        meta["assumptions"].append(
+            "本跑注入了 --base-exceptions（非现行路径）：老板定案不做 1–9 月个人例外，"
+            "现行默认仍是全员统一 2000；本文件仅供对照，不得当作现行应发")
     if active_set is not None:
         meta["assumptions"].append(
             "在职名单过滤（指令193·老板拍板）：仅在职名单人员计薪，张浩冉与已离职者不计薪、"
-            "其订单进排除清单；门店定档基数仍按当月全量订单（口径未改），本月两店按全量与"
+            "其订单进排除清单；门店定档基数仍按当月全量订单（H2 基数口径未改），本月两店按全量与"
             "仅计薪口径档位均为 4%，过滤不改档位率")
         meta["active_roster"] = {
             "file": str(Path(args.active_roster).resolve()),
@@ -369,7 +408,7 @@ def main(argv=None):
     with open(out_dir / ("payroll_%s.csv" % month), "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["月份", "验货人", "单量", "底薪", "基础", "全勤", "拉新",
-                    "上门单量", "上门分润", "上门提成(50%)", "线上单量(官网来源)",
+                    "上门单量", "上门分润", "上门提成(50%)", "线上单量(非门店来源)",
                     "线上金额(不含券)", "线上提成(1%)", "门店提成基数(不含券)",
                     "门店提成", "配件提成(占位0)", "分润合计", "应发草案合计",
                     "分润缺失行", "不含券缺失行"])
@@ -383,6 +422,10 @@ def main(argv=None):
                         p["profit_missing_rows"], p["base_amt_missing_rows"]])
 
     print("输入 %d 行 → 月份 %s 内 %d 行（月外 %d 行）" % (len(rows), month, len(in_month), out_month))
+    print("线上口径 ONLINE_MODE=%s：来源类型≠门店 的订单金额（不含券）×1%%"
+          "（BD/官网及其他非门店来源；旧口径仅官网已废止）" % ONLINE_MODE)
+    if not exceptions:
+        print("底薪口径：全员统一 2000（基础1000+全勤500+拉新500），不做 1–9 月个人例外")
     if active_set is not None:
         print("单量锚点 PASS：计薪单量 %d + 排除单量 %d == 月内行数 %d"
               % (total_orders, excluded_orders, len(in_month)))
