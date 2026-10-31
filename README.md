@@ -16,7 +16,7 @@
 ## 目录
 
 ```
-supabase/                 schema.sql、seed.sql、migration_002 … migration_013
+supabase/                 schema.sql、seed.sql、migration_002 … migration_015
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
 scripts/payroll/          实时工资草案（默认读 JSON 名单；employees 为可选只读）
 scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
@@ -27,7 +27,7 @@ scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 ## Supabase 初始化（一次性）
 
 1. 在 Supabase 新建项目。
-2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。`migration_011_salary_realtime_draft.sql`、`migration_012_employees.sql`、`migration_013_salary_rules_accessories_pct.sql` 都是当前线上库已经执行过的归档，本仓不代执行、不在变更里重跑。脚本默认不连库。
+2. SQL Editor 先执行 `supabase/schema.sql`，再执行 `supabase/seed.sql`。之后的结构变更按 `supabase/migration_*.sql` 的编号顺序执行。`migration_010_salary_effective_from.sql` 把工资规则生效月定为 2026-10，由老板在 SQL Editor 执行一次。`migration_011_salary_realtime_draft.sql`、`migration_012_employees.sql`、`migration_013_salary_rules_accessories_pct.sql`、`migration_014_salary_mistake_deduction.sql`、`migration_015_salary_mistake_totals.sql` 都是当前线上库已经执行过的归档，本仓不代执行、不在变更里重跑。脚本默认不连库。
 3. Settings → API 复制 Project URL 与 anon public key，填到前端仓 `.env.local`（模板在该仓 `.env.example`）。service role key 只留在服务端，不要加 `NEXT_PUBLIC_` 前缀，也不要提交。
 
 ## 抓数管道
