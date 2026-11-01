@@ -18,7 +18,7 @@
 ```
 supabase/                 schema.sql、seed.sql、migration_002 … migration_016
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
-scripts/payroll/          实时工资草案（默认只读 employees 在职行；JSON 仅离线显式）
+scripts/payroll/          实时工资草案；员工占位与底薪同步（默认不写库）
 scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
 scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
@@ -85,6 +85,16 @@ ALLOW_APPLY_REALTIME_DRAFT=true \
 默认 dry-run，不连库。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立。省略 `--month` 时只处理 Asia/Shanghai 日历当月；传入 `--month YYYY-MM` 时只处理该月，且 JSON 的 `meta.month` 必须相同。只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`，不删除本次未出现的行。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
 
 补贴、奖金是人手填的。`migration_011` 还没有 `subsidy_amount` / `bonus_amount`，本仓不另写 migration。列由库侧加上之后，写库前会先 GET 当月这两列：已有值（包括 0）原样写回，不用算薪 JSON 里的 0 覆盖；本次新出现的人写成 0；只刷新底薪和四项提成，再重算 `gross_amount = 五项 + 保留的补贴 + 保留的奖金`。列还没落地时这次 GET 会失败，脚本中止、不 upsert。dry-run 不读这两列，打印的应发不含库里已经手填的补贴和奖金。
+
+员工在职保存成功后占位、底薪改完后同步当月草案，是另一条写路径，不跑抓数、也不改上面的算薪灌库。契约、参数和 web 调用方式见 `docs/契约_员工草案占位与底薪同步.md`。默认不写库。`2026-10` 拒绝写入。`UPLOAD` / `APPLY` 保持 false。
+
+```bash
+python3 scripts/payroll/ensure_employee_placeholder.py \
+  --person-name <姓名> --base-salary <表底薪> --work-role 上门 --month 2026-11
+python3 scripts/payroll/sync_base_salary.py \
+  --person-name <姓名> --base-salary <新底薪> --month 2026-11
+python3 scripts/payroll/smoke_employee_draft_write.py
+```
 
 ## 运维清单
 
