@@ -4,9 +4,9 @@
 
 线上仍是 ONLINE_MODE=source_not_门店，只对门店角色。另测：
   门店角色的上门单 → 线上 ×1%，不进 door、不进门店阶梯，底薪缺省 2000；
-  上门角色：底薪强制 0；全部订单分润 ×50%；不进 online；
+  上门角色：底薪跟名单/employees.base_salary，缺省 2000；全部订单分润 ×50%；不进 online；
   仅交易方式=门店订单 × 固定 4%，不含券为空则回退订单金额；
-  无配件源 → 0；有独立导出 → 实付 ×30%；191 列冒充被拒绝；
+  无配件源 → 0；有独立导出 → 金额 ×30%（优先加盟商总实收金额）；191 列冒充被拒绝；
   缺 role / 仅姓名列表 → 失败；
   硬排除只剩吕文飞、杨燕辉；
   默认名单是 employees（注入假数据，不连库）；--active-roster 仍是离线 JSON，不与表合并；
@@ -134,6 +134,12 @@ def main():
         "new_customer": Decimal("500"),
     }
     assert pay.DOOR_PROFIT_PCT == Decimal("0.50")
+    assert pay.ACCESSORY_PERSON_COLS[0] == "创建订单员工"
+    assert pay.ACCESSORY_PERSON_COLS[1:] == ("归属人", "销售人")
+    assert pay.ACCESSORY_AMOUNT_COLS == ("加盟商总实收金额", "业绩金额", "实付金额")
+    assert pay.ACCESSORY_DATE_COLS[0] == "订单成交时间"
+    assert "完成时间" in pay.ACCESSORY_DATE_COLS
+    assert "门店验货人" in pay.ORDER_IMPERSONATION_COLS
     assert pay.STORE_BASE_FIELD == "订单金额（不含券）"
     assert pay.STORE_TIERS == [
         (Decimal("60000"), Decimal("0.04")),
@@ -227,7 +233,9 @@ def main():
         assert payload["meta"]["caliber"]["online_mode"] == (
             "source_not_门店+store_role_door_as_online|door_role_no_online")
         assert payload["meta"]["caliber"]["door_profit_pct"] == "50|role=上门_all_profit"
-        assert payload["meta"]["caliber"]["door_role_base"] == "0"
+        assert payload["meta"]["caliber"]["door_role_base"] == "roster|default=2000"
+        assert "强制 0" not in text and "无底薪" not in text
+        assert "上门与门店都取名单 base_salary，缺省 2000" in text
         assert payload["meta"]["caliber"]["door_role_store_pct"] == (
             "4|trade=门店订单|amt=不含券_else_订单金额")
         assert payload["meta"]["caliber"]["accessories_pct"] == "30|source=none"
@@ -277,7 +285,7 @@ def main():
         csv_head = (out / "payroll_2026-10.csv").read_text(encoding="utf-8").splitlines()[0]
         assert "线上提成(1%)" in csv_head
         assert "上门提成(50%·上门角色全部订单)" in csv_head
-        assert "配件提成(实付×30%)" in csv_head
+        assert "配件提成(金额×30%)" in csv_head
         assert "补贴" in csv_head and "奖金" in csv_head
         assert "官网来源" not in csv_head
 
@@ -398,8 +406,9 @@ def main():
         assert geng["online_amt"] == 5000.0 and geng["online_commission"] == 50.0
         assert geng["door_commission"] == 0.0 and geng["store_commission"] == 0.0
         assert ji["role"] == "上门"
-        assert ji["base_salary"] == 0.0
-        assert ji["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert ji["base_salary"] == 2000.0
+        assert ji["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
+        assert "底薪缺省2000" in ji["base_salary_source"]
         assert ji["door_profit"] == 250.0 and ji["door_commission"] == 125.0
         assert ji["door_orders"] == 2
         assert ji["online_orders"] == 0 and ji["online_amt"] == 0.0 and ji["online_commission"] == 0.0
@@ -431,16 +440,70 @@ def main():
         ji_acc = person(with_acc, "己")
         assert ji_acc["accessories_paid"] == 1500.0
         assert ji_acc["accessories_commission"] == 450.0
-        assert ji_acc["base_salary"] == 0.0
+        assert with_acc["meta"]["accessories"]["person_col"] == "归属人"
+        assert with_acc["meta"]["accessories"]["amount_col"] == "实付金额"
+        assert with_acc["meta"]["accessories"]["date_col"] == "完成时间"
+        assert "实付金额" in ji_acc["accessories_note"]
+        assert ji_acc["base_salary"] == 2000.0
         assert ji_acc["door_commission"] == 125.0
         assert ji_acc["online_commission"] == 0.0
-        assert ji_acc["gross"] == 575.0
+        assert ji_acc["gross"] == 2575.0
         assert_gross(ji_acc)
         assert all(p["person"] != "路人" for p in with_acc["people"])
         assert with_acc["meta"]["accessories"]["unmatched_people"] == 1
         assert with_acc["meta"]["accessories"]["rows_in_month"] == 3
         assert with_acc["totals"]["accessories_commission_total"] == 450.0
         assert "30|source=" in with_acc["meta"]["caliber"]["accessories_pct"]
+
+        fitting = tmp / "fitting.csv"
+        fitting.write_text(
+            "创建订单员工,归属人,销售人,加盟商总实收金额,业绩金额,实付金额,订单成交时间,完成时间\n"
+            "己,路人甲,路人乙,1000,9000,8000,2026-10-08 09:00:00,2026-09-01\n"
+            "己,路人甲,路人乙,500,1,1,2026-10-09,2026-10-09\n"
+            "己,路人甲,路人乙,999,1,1,2026-09-02,2026-10-10\n",
+            encoding="utf-8")
+        out_fit = tmp / "fit_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster),
+                            "--accessories-input", str(fitting), "--out-dir", str(out_fit)])
+        assert rc == 0, err
+        fitted = json.loads((out_fit / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        ji_fit = person(fitted, "己")
+        assert fitted["meta"]["accessories"]["person_col"] == "创建订单员工"
+        assert fitted["meta"]["accessories"]["amount_col"] == "加盟商总实收金额"
+        assert fitted["meta"]["accessories"]["date_col"] == "订单成交时间"
+        assert fitted["meta"]["accessories"]["rows_in_month"] == 2
+        assert fitted["meta"]["accessories"]["unmatched_people"] == 0
+        assert ji_fit["accessories_paid"] == 1500.0
+        assert ji_fit["accessories_commission"] == 450.0
+        assert ji_fit["base_salary"] == 2000.0
+        assert_gross(ji_fit)
+
+        perf = tmp / "perf.csv"
+        perf.write_text(
+            "创建订单员工,业绩金额,实付金额,订单成交时间\n"
+            "己,400,50,2026-10-11\n",
+            encoding="utf-8")
+        out_perf = tmp / "perf_out"
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster),
+                            "--accessories-input", str(perf), "--out-dir", str(out_perf)])
+        assert rc == 0, err
+        perf_payload = json.loads((out_perf / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        assert perf_payload["meta"]["accessories"]["amount_col"] == "业绩金额"
+        assert perf_payload["meta"]["accessories"]["person_col"] == "创建订单员工"
+        assert person(perf_payload, "己")["accessories_paid"] == 400.0
+        assert person(perf_payload, "己")["accessories_commission"] == 120.0
+
+        bad_cols = tmp / "bad_acc.csv"
+        bad_cols.write_text("创建订单员工,订单成交时间\n己,2026-10-01\n", encoding="utf-8")
+        rc, err = run(pay, ["--input", str(role_src), "--month", "2026-10",
+                            "--active-roster", str(role_roster),
+                            "--accessories-input", str(bad_cols),
+                            "--out-dir", str(tmp / "bad_acc_out")])
+        assert rc == pay.EXIT_ERROR, (rc, err)
+        assert "缺少列" in err
+        assert not (tmp / "bad_acc_out").exists()
 
         fake_191 = tmp / "fake_191.csv"
         write_orders(fake_191, role_rows[:1])
@@ -465,10 +528,10 @@ def main():
         assert rc == 0, err
         custom_payload = json.loads((out_custom / "payroll_2026-10.json").read_text(encoding="utf-8"))
         ji_custom = person(custom_payload, "己")
-        assert ji_custom["base_salary"] == 0.0
-        assert ji_custom["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
-        assert "无底薪" in ji_custom["base_salary_source"]
-        assert ji_custom["gross"] == 125.0
+        assert ji_custom["base_salary"] == 2500.0
+        assert ji_custom["base_breakdown"] == {"basic": 2500.0, "attendance": 0.0, "new_customer": 0.0}
+        assert "自定义底薪" in ji_custom["base_salary_source"]
+        assert ji_custom["gross"] == 2625.0
         assert_gross(ji_custom)
         zero = {"name": "闲", "role": "门店", "base_salary": 2300}
         dump_roster(tmp / "with_idle.json", [
@@ -503,20 +566,17 @@ def main():
             {"name": "上门甲", "role": "上门", "base_salary": 2500},
             {"name": "门店乙", "role": "门店"},
         ])
-        exc_door = tmp / "exc_door.json"
-        exc_door.write_text(json.dumps({"上门甲": 9999}, ensure_ascii=False), encoding="utf-8")
         out_trade = tmp / "trade_out"
         rc, err = run(pay, ["--input", str(trade_src), "--month", "2026-10",
                             "--active-roster", str(trade_roster),
-                            "--base-exceptions", str(exc_door),
                             "--out-dir", str(out_trade)])
         assert rc == 0, err
         traded = json.loads((out_trade / "payroll_2026-10.json").read_text(encoding="utf-8"))
         shang = person(traded, "上门甲")
         mendian = person(traded, "门店乙")
-        assert shang["base_salary"] == 0.0
-        assert shang["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
-        assert "无底薪" in shang["base_salary_source"]
+        assert shang["base_salary"] == 2500.0
+        assert shang["base_breakdown"] == {"basic": 2500.0, "attendance": 0.0, "new_customer": 0.0}
+        assert "自定义底薪" in shang["base_salary_source"]
         assert shang["door_profit"] == 360.0 and shang["door_commission"] == 180.0
         assert shang["online_orders"] == 0 and shang["online_amt"] == 0.0 and shang["online_commission"] == 0.0
         assert shang["store_order_rows"] == 3
@@ -535,7 +595,24 @@ def main():
         assert trade_stores["石河子友谊商厦店"]["tier_rate_by_base"] == 0.03
         assert_gross(shang)
         assert_gross(mendian)
-        assert shang["gross"] == 380.0
+        assert shang["gross"] == 2880.0
+
+        exc_door = tmp / "exc_door.json"
+        exc_door.write_text(json.dumps({"上门甲": 9999}, ensure_ascii=False), encoding="utf-8")
+        out_exc_door = tmp / "exc_door_out"
+        rc, err = run(pay, ["--input", str(trade_src), "--month", "2026-10",
+                            "--active-roster", str(trade_roster),
+                            "--base-exceptions", str(exc_door),
+                            "--out-dir", str(out_exc_door)])
+        assert rc == 0, err
+        excused_door = json.loads((out_exc_door / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        shang_exc = person(excused_door, "上门甲")
+        assert shang_exc["base_salary"] == 9999.0
+        assert "个人例外" in shang_exc["base_salary_source"]
+        assert shang_exc["door_commission"] == 180.0
+        assert shang_exc["store_commission"] == 200.0
+        assert shang_exc["gross"] == 10379.0
+        assert_gross(shang_exc)
 
         calls = {"n": 0}
 
@@ -560,8 +637,8 @@ def main():
         assert emp["meta"]["caliber"]["roster"] == "employees"
         emp_jia = person(emp, "甲")
         emp_yi = person(emp, "乙")
-        assert emp_jia["role"] == "上门" and emp_jia["base_salary"] == 0.0
-        assert emp_jia["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert emp_jia["role"] == "上门" and emp_jia["base_salary"] == 2000.0
+        assert emp_jia["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
         assert emp_jia["door_profit"] == 210.0 and emp_jia["door_commission"] == 105.0
         assert emp_jia["online_commission"] == 0.0 and emp_jia["online_amt"] == 0.0
         assert emp_jia["store_commission"] == 0.0
@@ -574,8 +651,11 @@ def main():
         assert all(p["person"] != "离职丙" for p in emp["people"])
         assert_gross(emp_jia)
         assert_gross(emp_yi)
-        assert "忽略" in "\n".join(emp["meta"]["assumptions"])
-        assert "无底薪" in emp_jia["base_salary_source"]
+        emp_notes = "\n".join(emp["meta"]["assumptions"])
+        assert "忽略" not in emp_notes
+        assert "无底薪" not in emp_notes and "强制 0" not in emp_notes
+        assert "上门与门店都采用表内 base_salary" in emp_notes
+        assert "底薪缺省2000" in emp_jia["base_salary_source"]
 
         def default_rows(_env):
             default_rows.n += 1
@@ -601,9 +681,9 @@ def main():
         assert default_payload["meta"]["active_roster"]["source"] == "employees"
         d_jia = person(default_payload, "甲")
         d_yi = person(default_payload, "乙")
-        assert d_jia["role"] == "上门" and d_jia["base_salary"] == 0.0
-        assert d_jia["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
-        assert "无底薪" in d_jia["base_salary_source"]
+        assert d_jia["role"] == "上门" and d_jia["base_salary"] == 2000.0
+        assert d_jia["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
+        assert "底薪缺省2000" in d_jia["base_salary_source"]
         assert d_yi["role"] == "门店" and d_yi["base_salary"] == 2300.0
         assert d_yi["base_breakdown"]["basic"] == 2300.0
         assert d_yi["base_breakdown"]["attendance"] == 0.0
@@ -611,7 +691,7 @@ def main():
         assert_gross(d_jia)
         assert_gross(d_yi)
         echoed = {item["name"]: item for item in default_payload["meta"]["active_roster"]["active"]}
-        assert echoed["甲"]["base_salary"] == 0.0
+        assert echoed["甲"]["base_salary"] == 2000.0
         assert echoed["乙"]["base_salary"] == 2300.0
 
         def blocked_emp(_env):
@@ -701,12 +781,14 @@ def main():
         jing = person(official, "张静怡")
         du = person(official, "杜飞")
         assert official["meta"]["store_tier_reference"]["石河子万达店"]["base_amt_excl_coupon"] == 1100.0
-        assert hao["role"] == "上门" and hao["base_salary"] == 0.0
+        assert hao["role"] == "上门" and hao["base_salary"] == 2000.0
+        assert hao["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
         assert hao["door_commission"] == 100.0 and hao["orders"] == 1
         assert hao["online_commission"] == 0.0 and hao["store_commission"] == 0.0
-        assert jing["role"] == "上门" and jing["orders"] == 0 and jing["base_salary"] == 0.0
-        assert jing["gross"] == 0.0
-        assert jing["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert hao["gross"] == 2100.0
+        assert jing["role"] == "上门" and jing["orders"] == 0 and jing["base_salary"] == 2000.0
+        assert jing["gross"] == 2000.0
+        assert jing["base_breakdown"] == {"basic": 1000.0, "attendance": 500.0, "new_customer": 500.0}
         assert du["role"] == "门店" and du["orders"] == 0 and du["gross"] == 2000.0
         assert all(p["person"] not in pay.HARD_EXCLUDED for p in official["people"])
         excluded_names = {e["person"] for e in official["meta"]["active_roster"]["excluded"]}
@@ -743,12 +825,12 @@ def main():
         assert code == 0, out_buf.getvalue()
         assert grabbed["table"] == "salary_realtime_draft"
         ji_row = next(r for r in grabbed["rows"] if r["person_name"] == "己")
-        assert ji_row["base_amount"] == "0.00"
+        assert ji_row["base_amount"] == "2000.00"
         assert ji_row["accessories_amount"] == "450.00"
         assert ji_row["door_amount"] == "125.00"
         assert ji_row["online_amount"] == "0.00"
         assert ji_row["store_amount"] == "0.00"
-        assert ji_row["gross_amount"] == "575.00"
+        assert ji_row["gross_amount"] == "2575.00"
         assert "door=50|role=上门_all_profit" in ji_row["caliber"]
         assert "door_store=4|trade=门店订单|amt=不含券_else_订单金额" in ji_row["caliber"]
         assert "role" not in ji_row
@@ -757,8 +839,9 @@ def main():
 
     assert CONFIG.read_bytes() == cfg_before
     print("smoke_online_mode PASS：默认读在职 employees（假数据）；"
-          "上门底薪强制 0（表内 2000 不采用）；JSON 离线仍可用且不与表合并；"
+          "上门底薪跟名单/表内 base_salary，缺省 2000；JSON 离线仍可用且不与表合并；"
           "全分润×50%、门店订单×4%；门店角色 A1 保持；缺配件源为 0；"
+          "配件列优先创建订单员工/加盟商总实收金额/订单成交时间；"
           "补贴奖金为 0；硬排除仅吕文飞/杨燕辉；未写生产库。")
     return 0
 
