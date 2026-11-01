@@ -61,9 +61,13 @@ python3 scripts/payroll/realtime_payroll.py \
 python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON>
 ALLOW_APPLY_REALTIME_DRAFT=true \
   python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON> --apply
+# 日历已过该月时，用 --month 指定终数回写月（仍须双闸才写库；缺一则 dry-run）：
+python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON> --month 2026-10
+ALLOW_APPLY_REALTIME_DRAFT=true \
+  python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON> --month 2026-10 --apply
 ```
 
-默认 dry-run。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立，并且只处理当月、只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
+默认 dry-run。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立。省略 `--month` 时只处理 Asia/Shanghai 日历当月；传入 `--month YYYY-MM` 时只处理该月，且 JSON 的 `meta.month` 必须相同。只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`，不删除本次未出现的行。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
 
 ## 运维清单
 

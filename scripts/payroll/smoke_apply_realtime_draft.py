@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""灌数脚本冒烟：默认 dry-run、双闸才写、只处理当月、只写 salary_realtime_draft。
+"""灌数脚本冒烟：默认 dry-run、双闸才写、默认只处理当月、只写 salary_realtime_draft。
 
-不连库。个人级样例用虚构姓名，跑完即删。
+--month 只改目标月，不单独放行写库。不连库。个人级样例用虚构姓名，跑完即删。
 """
 
 import hashlib
@@ -82,12 +82,14 @@ class Capture:
         return len(rows)
 
 
-def run(mod, data, apply_flag, env, writer, now=NOW):
+def run(mod, data, apply_flag, env, writer, now=NOW, month=None):
     out, err = io.StringIO(), io.StringIO()
     with tempfile.TemporaryDirectory(prefix="apply_draft_") as tmp:
         path = Path(tmp) / "payroll.json"
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         argv = ["--input", str(path)]
+        if month is not None:
+            argv.extend(["--month", month])
         if apply_flag:
             argv.append("--apply")
         with redirect_stdout(out), redirect_stderr(err):
@@ -171,8 +173,53 @@ def main():
     code, _out, err = run(mod, payload(month="2026-09"), True, {mod.ENV_GATE: "true"}, cap)
     assert code == 2 and "生效月" in err and len(cap.calls) == 1
     later = datetime(2026, 11, 1, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    code, _out, err = run(mod, payload(), True, {mod.ENV_GATE: "true"}, cap, now=later)
-    assert code == 2 and len(cap.calls) == 1
+    code, out, err = run(mod, payload(), True, {mod.ENV_GATE: "true"}, cap, now=later)
+    assert code == 2 and "当月" in err and "终数回写月" not in out and len(cap.calls) == 1
+    # 日历已是 2026-11：省略 --month 仍拒绝 2026-10，即使双闸开齐也不写。
+    code, out, err = run(mod, payload(month="2026-10"), True, {mod.ENV_GATE: "true"}, cap, now=later)
+    assert code == 2 and "当月" in err and "2026-11" in err and len(cap.calls) == 1
+    code, out, err = run(mod, payload(month="2026-11"), False, {}, Capture(), now=later)
+    assert code == 0 and "当月" in out and "终数回写月" not in out and "未写库" in out
+
+    # --month=2026-10：匹配的 payload 在 dry-run 路径放行，单闸仍不写。
+    cap_m = Capture()
+    code, out, err = run(
+        mod, payload(month="2026-10"), False, {}, cap_m, now=later, month="2026-10")
+    assert code == 0, err
+    assert cap_m.calls == []
+    assert "未写库" in out and "dry-run" in out
+    assert "终数回写月" in out and "explicit month" in out and "2026-10" in out
+    code, out, err = run(
+        mod, payload(month="2026-10"), True, {}, cap_m, now=later, month="2026-10")
+    assert code == 0 and "dry-run" in out and cap_m.calls == []
+    code, out, err = run(
+        mod, payload(month="2026-10"), False, {mod.ENV_GATE: "true"}, cap_m,
+        now=later, month="2026-10")
+    assert code == 0 and "dry-run" in out and cap_m.calls == []
+    code, out, err = run(
+        mod, payload(month="2026-10"), True, {mod.ENV_GATE: "true"}, cap_m,
+        now=later, month="2026-10")
+    assert code == 0, err
+    assert len(cap_m.calls) == 1
+    assert cap_m.calls[0][0] == "salary_realtime_draft"
+    assert cap_m.calls[0][1][0]["month"] == "2026-10"
+    assert "终数回写月" in out and "已 upsert 1 行" in out
+    code, _out, err = run(
+        mod, payload(month="2026-11"), True, {mod.ENV_GATE: "true"}, cap_m,
+        now=later, month="2026-10")
+    assert code == 2 and "指定月" in err and "2026-10" in err and len(cap_m.calls) == 1
+    code, _out, err = run(
+        mod, payload(month="2026-10"), False, {}, cap_m, now=later, month="2026-13")
+    assert code == 1 and "YYYY-MM" in err and len(cap_m.calls) == 1
+    blocked_explicit = payload(people=[{
+        "person": pay.HARD_EXCLUDED[0],
+        "base_salary": "2000",
+        "gross": "2000",
+    }])
+    code, _out, err = run(
+        mod, blocked_explicit, True, {mod.ENV_GATE: "true"}, cap_m,
+        now=later, month="2026-10")
+    assert code == 3 and len(cap_m.calls) == 1
 
     dup = payload(people=[
         {"person": "示例甲", "base_salary": "1", "gross": "1"},
