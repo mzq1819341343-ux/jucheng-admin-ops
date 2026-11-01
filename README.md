@@ -12,7 +12,7 @@
 - `docs/fetch-pipeline/pipeline_config.json` 里 `UPLOAD` 与 `APPLY` 保持 false。`docs/fetch-pipeline/auto_fetch.py` 的 `ALLOW_UPLOAD_PHASE = False`，配置被改成 true 也不会上传。
 - 个人工资明细、姓名对应金额、密钥不入库。实时工资脚本的个人产物只写到本机 `--out-dir`。在职角色只保留 `scripts/payroll/active_roster.example.json` 这一份样例，不要复制到文档或算数脚本里。
 - 前端仓 `lib/realtime-payroll.ts` 的汇总数字保持基线上的指令194 原文。这次拆分没有改那个文件。
-- 抓取任务只在 Mac 的 `fetch_jobs` 目录写队列文件。`scripts/fetch_jobs.py` 不登录加盟后台，不把 `UPLOAD` / `APPLY` 写成 true，不写工资表，也不新增 migration。
+- 抓取任务的真源是表 `salary_fetch_runs`（库上已有，本仓不新增、不归档 migration）。`scripts/fetch_jobs.py` 在有 service role 时写认领和回写；没有凭据时不连库。不登录加盟后台，不把 `upload` / `apply` / `login` 写成 true，不写工资表。
 
 ## 目录
 
@@ -23,7 +23,7 @@ scripts/payroll/          实时工资草案；员工占位与底薪同步（默
 scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
 scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
-scripts/fetch_jobs.py     抓取任务文件态（下发、latest、Mac runner 占位）
+scripts/fetch_jobs.py     抓取任务：claim / complete 写 salary_fetch_runs，文件只作缓存
 scripts/smoke_fetch_jobs.py
 ```
 
@@ -43,7 +43,7 @@ python3 docs/fetch-pipeline/auto_fetch.py --check
 
 管道只落盘样本。crontab / launchd 示例是注释态，未安装。
 
-工资页「数据抓取」的队列单独落在 Mac 的 `fetch_jobs` 目录，契约和冒烟见 `docs/契约_fetch-jobs.md`。
+工资页「数据抓取」的真源是表 `salary_fetch_runs`。Mac 上的 `fetch_jobs` 目录只作缓存。契约和冒烟见 `docs/契约_fetch-jobs.md`。
 
 ```bash
 python3 scripts/smoke_fetch_jobs.py
