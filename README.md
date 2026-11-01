@@ -18,7 +18,7 @@
 ```
 supabase/                 schema.sql、seed.sql、migration_002 … migration_015
 docs/                     原 docs 全量：fetch-pipeline、验收、指令草稿、运维清单
-scripts/payroll/          实时工资草案（默认读 JSON 名单；employees 为可选只读）
+scripts/payroll/          实时工资草案（默认只读 employees 在职行；JSON 仅离线显式）
 scripts/apply_realtime_payroll_draft.py  草案 upsert（默认 dry-run）
 scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/ 经 REG_WEB_ROOT 读前端仓）
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
@@ -42,16 +42,31 @@ python3 docs/fetch-pipeline/auto_fetch.py --check
 
 ## 实时工资草案
 
+默认只读 `public.employees` 里 `employment_status=在职` 的行（`person_name`、`work_role`→角色、`base_salary`）。不写库。凭据只放环境变量，不进命令行、不进仓库：
+
+```bash
+SUPABASE_URL=https://<project>.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key> \
+python3 scripts/payroll/realtime_payroll.py \
+  --input <本机原生导出.xlsx> \
+  --month 2026-10 \
+  --accessories-input <本机配件导出.csv> \
+  --out-dir <本机目录>
+```
+
+`SUPABASE_URL` 也接受 `NEXT_PUBLIC_SUPABASE_URL`。显式 `--roster-from=employees` 或 `ROSTER_SOURCE=employees` 与默认相同。没有这两项凭据时直接失败，不会改用空名单。
+
+离线或显式指定时才用 JSON，而且不读库。JSON 与员工表不能同时用，也不会合并：
+
 ```bash
 python3 scripts/payroll/realtime_payroll.py \
   --input <本机原生导出.xlsx> \
   --month 2026-10 \
   --active-roster <本机在职名单.json> \
-  --accessories-input <本机配件导出.csv> \
   --out-dir <本机目录>
 ```
 
-名单 JSON 里每人要有 `role`（上门或门店），可省略 `base_salary`（门店角色缺省 2000；上门角色算数时底薪强制 0）。缺 role 拒绝出草案。上门角色拿名下全部订单分润的 50%，不进线上；其门店提成只计交易方式为「门店订单」的金额（不含券为空则用订单金额）× 固定 4%。没给 `--accessories-input` 或文件不存在时配件提成为 0，并在 assumptions 注明；不要把旧机订单列当成配件。可选只读在职表：`--roster-from=employees`（或 `ROSTER_SOURCE=employees`），只 GET `employment_status=在职` 的 `work_role` 与 `base_salary`，不写库。当前在职样例是 `scripts/payroll/active_roster.example.json`，不要把名单再复制进别的文件。
+名单 JSON 里每人要有 `role`（上门或门店），可省略 `base_salary`（门店等非上门角色缺省 2000，或用表内 `base_salary`）。上门角色算数时底薪强制 0，表里或 JSON 写成 2000 也不采用。缺 role 拒绝出草案。上门角色拿名下全部订单分润的 50%，不进线上；其门店提成只计交易方式为「门店订单」的金额（不含券为空则用订单金额）× 固定 4%。没给 `--accessories-input` 或文件不存在时配件提成为 0，并在 assumptions 注明；不要把旧机订单列当成配件。应发 `gross = base + door + online + store + accessories + subsidy + bonus`。本脚本把补贴、奖金写成 0。当前在职样例是 `scripts/payroll/active_roster.example.json`，不要把名单再复制进别的文件。
 
 标准输出只打印汇总锚点。个人清单留在 `--out-dir`，不要提交。前端人效卡读 web 仓 `lib/realtime-payroll.ts`。在月结校准合并之前不要改那些汇总数。口径说明见 `docs/工资字段映射_新口径.md`。
 
@@ -67,7 +82,9 @@ ALLOW_APPLY_REALTIME_DRAFT=true \
   python3 scripts/apply_realtime_payroll_draft.py --input <payroll JSON> --month 2026-10 --apply
 ```
 
-默认 dry-run。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立。省略 `--month` 时只处理 Asia/Shanghai 日历当月；传入 `--month YYYY-MM` 时只处理该月，且 JSON 的 `meta.month` 必须相同。只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`，不删除本次未出现的行。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
+默认 dry-run，不连库。`pipeline_config.json` 的 `APPLY` 保持 false，灌数脚本不改这个键，也不靠它放行。真正写库要 `ALLOW_APPLY_REALTIME_DRAFT=true` 和 `--apply` 同时成立。省略 `--month` 时只处理 Asia/Shanghai 日历当月；传入 `--month YYYY-MM` 时只处理该月，且 JSON 的 `meta.month` 必须相同。只写 `salary_realtime_draft`，冲突键是 `(month, person_name)`，不删除本次未出现的行。写库另需环境变量 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`（不进仓库）。
+
+补贴、奖金是人手填的。`migration_011` 还没有 `subsidy_amount` / `bonus_amount`，本仓不另写 migration。列由库侧加上之后，写库前会先 GET 当月这两列：已有值（包括 0）原样写回，不用算薪 JSON 里的 0 覆盖；本次新出现的人写成 0；只刷新底薪和四项提成，再重算 `gross_amount = 五项 + 保留的补贴 + 保留的奖金`。列还没落地时这次 GET 会失败，脚本中止、不 upsert。dry-run 不读这两列，打印的应发不含库里已经手填的补贴和奖金。
 
 ## 运维清单
 

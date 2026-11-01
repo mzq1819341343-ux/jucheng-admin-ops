@@ -9,7 +9,8 @@
   无配件源 → 0；有独立导出 → 实付 ×30%；191 列冒充被拒绝；
   缺 role / 仅姓名列表 → 失败；
   硬排除只剩吕文飞、杨燕辉；
-  employees 只读分支（注入假数据，不连库）。
+  默认名单是 employees（注入假数据，不连库）；--active-roster 仍是离线 JSON，不与表合并；
+  补贴、奖金写出 0，应发含这两项。
 
 不连生产库，不灌草案。个人级输出只落临时目录并在结束时删除。
 """
@@ -76,8 +77,10 @@ def dec(value):
 
 
 def assert_gross(row):
+    assert row["subsidy"] == 0.0 and row["bonus"] == 0.0
     expect = (dec(row["base_salary"]) + dec(row["door_commission"]) + dec(row["online_commission"])
-              + dec(row["store_commission"]) + dec(row["accessories_commission"]))
+              + dec(row["store_commission"]) + dec(row["accessories_commission"])
+              + dec(row["subsidy"]) + dec(row["bonus"]))
     assert dec(row["gross"]) == expect, (row["person"], row["gross"], expect)
 
 
@@ -267,12 +270,15 @@ def main():
         assert payload["totals"]["store_commission_total"] == 1500.0
         assert payload["totals"]["accessories_commission_total"] == 0.0
         assert payload["totals"]["gross_total"] == 5950.0
+        assert payload["totals"]["subsidy_total"] == 0.0
+        assert payload["totals"]["bonus_total"] == 0.0
         assert_gross(jia)
         assert_gross(yi)
         csv_head = (out / "payroll_2026-10.csv").read_text(encoding="utf-8").splitlines()[0]
         assert "线上提成(1%)" in csv_head
         assert "上门提成(50%·上门角色全部订单)" in csv_head
         assert "配件提成(实付×30%)" in csv_head
+        assert "补贴" in csv_head and "奖金" in csv_head
         assert "官网来源" not in csv_head
 
         missing_acc = tmp / "no-such-accessories.csv"
@@ -317,10 +323,19 @@ def main():
         assert any("非现行路径" in a for a in excused["meta"]["assumptions"])
 
         rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
-                            "--out-dir", str(tmp / "no_roster")])
+                            "--roster-from", "json",
+                            "--out-dir", str(tmp / "json_missing")])
         assert rc == pay.EXIT_ROSTER, (rc, err)
-        assert "拒绝出草案" in err and "role" in err
-        assert not (tmp / "no_roster").exists()
+        assert "拒绝出草案" in err and "active-roster" in err
+        assert not (tmp / "json_missing").exists()
+
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            rc = pay.main(["--input", str(src), "--month", "2026-10",
+                           "--out-dir", str(tmp / "no_cred")], env={})
+        assert rc == pay.EXIT_ERROR, err_buf.getvalue()
+        assert "SUPABASE" in err_buf.getvalue()
+        assert not (tmp / "no_cred").exists()
 
         names_only = tmp / "names_only.json"
         names_only.write_text(json.dumps({"active": ["甲"]}, ensure_ascii=False), encoding="utf-8")
@@ -527,7 +542,7 @@ def main():
         def employees(_env):
             calls["n"] += 1
             return [
-                {"person_name": "甲", "work_role": "上门", "base_salary": "1800",
+                {"person_name": "甲", "work_role": "上门", "base_salary": "2000",
                  "employment_status": "在职"},
                 {"person_name": "乙", "work_role": "门店", "base_salary": None,
                  "employment_status": "在职"},
@@ -559,6 +574,71 @@ def main():
         assert all(p["person"] != "离职丙" for p in emp["people"])
         assert_gross(emp_jia)
         assert_gross(emp_yi)
+        assert "忽略" in "\n".join(emp["meta"]["assumptions"])
+        assert "无底薪" in emp_jia["base_salary_source"]
+
+        def default_rows(_env):
+            default_rows.n += 1
+            return [
+                {"person_name": "甲", "work_role": "上门", "base_salary": 2000,
+                 "employment_status": "在职"},
+                {"person_name": "乙", "work_role": "门店", "base_salary": 2300,
+                 "employment_status": "在职"},
+                {"person_name": "吕文飞", "work_role": "门店", "base_salary": 2000,
+                 "employment_status": "离职"},
+                {"person_name": "离职丙", "work_role": "门店", "base_salary": 1800,
+                 "employment_status": "离职"},
+            ]
+
+        default_rows.n = 0
+        out_def = tmp / "default_emp"
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--out-dir", str(out_def)], fetcher=default_rows)
+        assert rc == 0, err
+        assert default_rows.n == 1
+        default_payload = json.loads((out_def / "payroll_2026-10.json").read_text(encoding="utf-8"))
+        assert default_payload["meta"]["caliber"]["roster"] == "employees"
+        assert default_payload["meta"]["active_roster"]["source"] == "employees"
+        d_jia = person(default_payload, "甲")
+        d_yi = person(default_payload, "乙")
+        assert d_jia["role"] == "上门" and d_jia["base_salary"] == 0.0
+        assert d_jia["base_breakdown"] == {"basic": 0.0, "attendance": 0.0, "new_customer": 0.0}
+        assert "无底薪" in d_jia["base_salary_source"]
+        assert d_yi["role"] == "门店" and d_yi["base_salary"] == 2300.0
+        assert d_yi["base_breakdown"]["basic"] == 2300.0
+        assert d_yi["base_breakdown"]["attendance"] == 0.0
+        assert {p["person"] for p in default_payload["people"]} == {"甲", "乙"}
+        assert_gross(d_jia)
+        assert_gross(d_yi)
+        echoed = {item["name"]: item for item in default_payload["meta"]["active_roster"]["active"]}
+        assert echoed["甲"]["base_salary"] == 0.0
+        assert echoed["乙"]["base_salary"] == 2300.0
+
+        def blocked_emp(_env):
+            return [
+                {"person_name": "杨燕辉", "work_role": "门店", "base_salary": 2000,
+                 "employment_status": "在职"},
+                {"person_name": "甲", "work_role": "门店", "base_salary": 2000,
+                 "employment_status": "在职"},
+            ]
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--out-dir", str(tmp / "emp_blocked")],
+                      fetcher=blocked_emp)
+        assert rc == pay.EXIT_HARD_EXCLUDED, (rc, err)
+        assert "杨燕辉" in err
+        assert not (tmp / "emp_blocked").exists()
+
+        def bad_status(_env):
+            return [{"person_name": "甲", "work_role": "门店", "base_salary": 2000,
+                     "employment_status": "停薪"}]
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--out-dir", str(tmp / "bad_status")],
+                      fetcher=bad_status)
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "employment_status" in err
+        assert not (tmp / "bad_status").exists()
 
         def missing_role(_env):
             return [{"person_name": "甲", "work_role": "", "base_salary": 2000,
@@ -586,6 +666,16 @@ def main():
                             "--out-dir", str(tmp / "both")],
                       fetcher=conflict_fetcher)
         assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "不能同时" in err
+        assert not (tmp / "both").exists()
+
+        rc, err = run(pay, ["--input", str(src), "--month", "2026-10",
+                            "--active-roster", str(roster),
+                            "--out-dir", str(tmp / "env_mix")],
+                      env={"ROSTER_SOURCE": "employees"}, fetcher=conflict_fetcher)
+        assert rc == pay.EXIT_ROSTER, (rc, err)
+        assert "不能同时" in err
+        assert not (tmp / "env_mix").exists()
 
         example = json.loads(EXAMPLE.read_text(encoding="utf-8"))
         by_role = {}
@@ -666,10 +756,10 @@ def main():
         assert "30|source=" in ji_row["caliber"]
 
     assert CONFIG.read_bytes() == cfg_before
-    print("smoke_online_mode PASS：上门角色无底薪、全分润×50%、无 online、"
-          "仅交易方式=门店订单×4%且不含券空回退订单金额；"
-          "门店角色 A1 保持；缺配件源为 0；缺 role 拒绝；"
-          "硬排除仅吕文飞/杨燕辉；dry-run 未写生产库。")
+    print("smoke_online_mode PASS：默认读在职 employees（假数据）；"
+          "上门底薪强制 0（表内 2000 不采用）；JSON 离线仍可用且不与表合并；"
+          "全分润×50%、门店订单×4%；门店角色 A1 保持；缺配件源为 0；"
+          "补贴奖金为 0；硬排除仅吕文飞/杨燕辉；未写生产库。")
     return 0
 
 

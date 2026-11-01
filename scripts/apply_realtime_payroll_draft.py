@@ -17,6 +17,15 @@ pipeline 配置 TIMEZONE）。可选 --month YYYY-MM 指定终数回写月：此
 双闸逻辑不改。不碰 salary_detail_import / salary_monthly。不改 pipeline_config
 的 UPLOAD / APPLY。
 
+补贴 / 奖金：算薪 JSON 的 subsidy、bonus 只是草案预览（脚本写成 0）。
+真正写库前先 GET 当月已有行的 subsidy_amount、bonus_amount。
+已有值（含 0）原样写回，不用 JSON 覆盖。新人写成 0。
+应发 gross = base + door + online + store + accessories + 保留的补贴 + 保留的奖金，
+net = gross - deduction。只刷新底薪与四项提成。
+migration_011 还没有这两列；本脚本不新增 migration。列落地后才映射：
+subsidy→subsidy_amount，bonus→bonus_amount。列还不存在时，写库前的 GET 会失败，
+本次不 upsert，避免把未读到的手填值刷成 0。dry-run 不读这两列。
+
 用法：
   python3 scripts/apply_realtime_payroll_draft.py \\
     --input ~/Desktop/05_Muse督工/payroll_193/payroll_2026-10.json
@@ -57,8 +66,15 @@ MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 UPSERT_COLUMNS = (
     "month", "person_name", "as_of",
     "base_amount", "door_amount", "online_amount", "store_amount",
-    "accessories_amount", "gross_amount", "deduction_amount", "net_amount",
+    "accessories_amount", "subsidy_amount", "bonus_amount",
+    "gross_amount", "deduction_amount", "net_amount",
     "caliber", "source", "updated_at",
+)
+# 手填列。migration_011 尚未包含；库侧另加列后再由本脚本映射。不在本仓写 DDL。
+HAND_FILLED_SELECT = "person_name,subsidy_amount,bonus_amount"
+COMPUTED_AMOUNT_COLUMNS = (
+    "base_amount", "door_amount", "online_amount", "store_amount",
+    "accessories_amount",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -199,18 +215,14 @@ def rows_from_payload(payload, month, as_of_iso, explicit_month=False):
         online = money(person.get("online_commission", person.get("online_amount")))
         store = money(person.get("store_commission", person.get("store_amount")))
         accessories = money(person.get("accessories_commission", person.get("accessories_amount")))
-        if person.get("gross") is None and person.get("gross_amount") is None:
-            gross = money(base + door + online + store + accessories)
-        else:
-            gross = money(person.get("gross", person.get("gross_amount")))
+        subsidy = money(person.get("subsidy", person.get("subsidy_amount")))
+        bonus = money(person.get("bonus", person.get("bonus_amount")))
         if person.get("deduction_amount") is None and person.get("deduction") is None:
             deduction = Decimal("0.00")
         else:
             deduction = money(person.get("deduction_amount", person.get("deduction")))
-        if person.get("net_amount") is None and person.get("net") is None:
-            net = money(gross - deduction)
-        else:
-            net = money(person.get("net_amount", person.get("net")))
+        gross = money(base + door + online + store + accessories + subsidy + bonus)
+        net = money(gross - deduction)
         row = {
             "month": month,
             "person_name": name,
@@ -220,6 +232,8 @@ def rows_from_payload(payload, month, as_of_iso, explicit_month=False):
             "online_amount": format(online, "f"),
             "store_amount": format(store, "f"),
             "accessories_amount": format(accessories, "f"),
+            "subsidy_amount": format(subsidy, "f"),
+            "bonus_amount": format(bonus, "f"),
             "gross_amount": format(gross, "f"),
             "deduction_amount": format(deduction, "f"),
             "net_amount": format(net, "f"),
@@ -236,12 +250,131 @@ def rows_from_payload(payload, month, as_of_iso, explicit_month=False):
 
 def totals_of(rows):
     keys = ("base_amount", "door_amount", "online_amount", "store_amount",
-            "accessories_amount", "gross_amount")
+            "accessories_amount", "subsidy_amount", "bonus_amount", "gross_amount")
     out = {k: Decimal("0.00") for k in keys}
     for row in rows:
         for key in keys:
             out[key] += Decimal(row[key])
     return {k: format(money(v), "f") for k, v in out.items()}
+
+
+def _hand_amount(record, primary, alias):
+    """已出现的手填金额。缺键表示响应里没有该列，返回 None。空值当 0。"""
+    seen = False
+    for key in (primary, alias):
+        if key not in record:
+            continue
+        seen = True
+        raw = record[key]
+        if raw is None or str(raw).strip() == "":
+            continue
+        return money(raw)
+    if seen:
+        return Decimal("0.00")
+    return None
+
+
+def recompute_payable(row):
+    parts = [Decimal(row[key]) for key in COMPUTED_AMOUNT_COLUMNS]
+    parts.append(Decimal(row["subsidy_amount"]))
+    parts.append(Decimal(row["bonus_amount"]))
+    gross = money(sum(parts, Decimal("0")))
+    deduction = money(row["deduction_amount"])
+    row["gross_amount"] = format(gross, "f")
+    row["net_amount"] = format(money(gross - deduction), "f")
+    extra = set(row) - set(UPSERT_COLUMNS)
+    if extra:
+        raise RuntimeError("灌数字段越界")
+    return row
+
+
+def preserve_hand_filled(rows, existing):
+    """写回已有补贴/奖金，新人强制 0。JSON 里的 subsidy/bonus 不覆盖库内值。
+
+    existing 是当月草案行（至少含 person_name）。不在本次名单里的人不进 rows，
+    调用方也不删除他们。
+    """
+    if not isinstance(existing, list):
+        raise RuntimeError("已有补贴/奖金须为数组，已中止未写库")
+    by_name = {}
+    for item in existing:
+        if not isinstance(item, dict):
+            raise RuntimeError("已有补贴/奖金行不是对象，已中止未写库")
+        name = str(item.get("person_name") or item.get("person") or "").strip()
+        if not name:
+            raise RuntimeError("已有补贴/奖金行缺少姓名，已中止未写库")
+        if name in by_name:
+            raise RuntimeError("已有补贴/奖金姓名重复，已中止未写库")
+        by_name[name] = item
+    out = []
+    for row in rows:
+        kept = dict(row)
+        prior = by_name.get(kept["person_name"])
+        if prior is None:
+            kept["subsidy_amount"] = format(Decimal("0.00"), "f")
+            kept["bonus_amount"] = format(Decimal("0.00"), "f")
+        else:
+            subsidy = _hand_amount(prior, "subsidy_amount", "subsidy")
+            bonus = _hand_amount(prior, "bonus_amount", "bonus")
+            kept["subsidy_amount"] = format(
+                Decimal("0.00") if subsidy is None else subsidy, "f")
+            kept["bonus_amount"] = format(
+                Decimal("0.00") if bonus is None else bonus, "f")
+        out.append(recompute_payable(kept))
+    return out
+
+
+def build_adjustments_request(base_url, service_key, month):
+    """只读当月 subsidy_amount、bonus_amount。不写库。"""
+    guard_table(TARGET_TABLE)
+    if not MONTH_RE.match(str(month or "")):
+        raise RuntimeError("读取补贴/奖金的月份非法，已中止未写库")
+    base = (base_url or "").strip().rstrip("/")
+    if not base.startswith("https://"):
+        raise RuntimeError("SUPABASE_URL 须为 https")
+    if not service_key or not str(service_key).strip():
+        raise RuntimeError("缺少 SUPABASE_SERVICE_ROLE_KEY")
+    query = urllib.parse.urlencode({
+        "select": HAND_FILLED_SELECT,
+        "month": "eq." + month,
+        "limit": "1000",
+    })
+    url = "%s/rest/v1/%s?%s" % (base, TARGET_TABLE, query)
+    path = urllib.parse.urlparse(url).path
+    if path != "/rest/v1/" + TARGET_TABLE:
+        raise RuntimeError("只允许读表 %s" % TARGET_TABLE)
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("apikey", service_key)
+    req.add_header("Authorization", "Bearer " + service_key)
+    req.add_header("Accept", "application/json")
+    return req
+
+
+def fetch_existing_adjustments(base_url, service_key, month):
+    """GET 失败则中止，不 upsert。列未落地时同样不写，避免把手填值刷掉。"""
+    req = build_adjustments_request(base_url, service_key, month)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=30) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        raise RuntimeError(
+            "读取已有补贴/奖金失败 HTTP %s，已中止未写库" % exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("读取已有补贴/奖金连接失败，已中止未写库") from exc
+    if status != 200:
+        raise RuntimeError("读取已有补贴/奖金失败 HTTP %s，已中止未写库" % status)
+    try:
+        rows = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("已有补贴/奖金响应不是 JSON，已中止未写库") from exc
+    if not isinstance(rows, list):
+        raise RuntimeError("已有补贴/奖金响应不是数组，已中止未写库")
+    if len(rows) >= 1000:
+        raise RuntimeError("当月草案行达到读取上限，已中止未写库")
+    return rows
 
 
 def build_upsert_request(base_url, service_key, table, rows):
@@ -299,7 +432,7 @@ def _as_of_iso(now, tz_name):
     return now.replace(microsecond=0).isoformat()
 
 
-def main(argv=None, env=None, writer=None, now=None):
+def main(argv=None, env=None, writer=None, now=None, existing_reader=None):
     ap = argparse.ArgumentParser(description="实时工资草案灌入 salary_realtime_draft（默认 dry-run）")
     ap.add_argument("--input", required=True, help="realtime_payroll 产出的 payroll_<month>.json")
     ap.add_argument("--month", default=None,
@@ -352,6 +485,29 @@ def main(argv=None, env=None, writer=None, now=None):
         print("计薪名单含硬排除人员，已中止", file=sys.stderr)
         return 3
 
+    if will_write and rows:
+        if existing_reader is None and writer is None:
+            url = (env.get("SUPABASE_URL") or env.get("NEXT_PUBLIC_SUPABASE_URL") or "").strip()
+            key = (env.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+            if not url or not key:
+                print("双闸已开，但缺少 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY，未写库",
+                      file=sys.stderr)
+                return 1
+
+            def existing_reader(_month=month, _url=url, _key=key):
+                return fetch_existing_adjustments(_url, _key, _month)
+
+            def writer(table, batch, _url=url, _key=key):
+                return postgrest_upsert(_url, _key, table, batch)
+        elif existing_reader is None:
+            def existing_reader():
+                return []
+        try:
+            rows = preserve_hand_filled(rows, existing_reader())
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
     totals = totals_of(rows)
     if explicit_month:
         print("月份 %s（终数回写月 / explicit month，时区 %s）" % (month, tz_name))
@@ -362,25 +518,18 @@ def main(argv=None, env=None, writer=None, now=None):
     print("双闸：%s=%s --apply=%s → %s" % (
         ENV_GATE, str(gate_env).lower(), str(bool(args.apply)).lower(),
         "apply" if will_write else "dry-run"))
-    print("人数 %s；应发合计 %s = 底薪 %s + 上门 %s + 线上 %s + 门店 %s + 配件 %s" % (
+    print("人数 %s；应发合计 %s = 底薪 %s + 上门 %s + 线上 %s + 门店 %s + 配件 %s + 补贴 %s + 奖金 %s" % (
         len(rows), totals["gross_amount"], totals["base_amount"], totals["door_amount"],
-        totals["online_amount"], totals["store_amount"], totals["accessories_amount"]))
+        totals["online_amount"], totals["store_amount"], totals["accessories_amount"],
+        totals["subsidy_amount"], totals["bonus_amount"]))
 
     if not will_write:
         print("未写库。写库须同时 %s=true 与 --apply，且只 upsert %s，键 (month, person_name)。"
               % (ENV_GATE, TARGET_TABLE))
+        print("补贴/奖金：dry-run 不读库，上面的应发不含 salary_realtime_draft 里已手填的值。"
+              "写库时只刷新底薪与四项提成，保留已有 subsidy_amount、bonus_amount（含 0），"
+              "新人写 0，再重算应发。不删除本次未出现的行。")
         return 0
-
-    if writer is None:
-        url = (env.get("SUPABASE_URL") or env.get("NEXT_PUBLIC_SUPABASE_URL") or "").strip()
-        key = (env.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-        if not url or not key:
-            print("双闸已开，但缺少 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY，未写库",
-                  file=sys.stderr)
-            return 1
-
-        def writer(table, batch, _url=url, _key=key):
-            return postgrest_upsert(_url, _key, table, batch)
 
     if not rows:
         label = "指定月" if explicit_month else "当月"
@@ -391,7 +540,8 @@ def main(argv=None, env=None, writer=None, now=None):
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print("已 upsert %s 行 → %s（键 month, person_name）" % (written, TARGET_TABLE))
+    print("已 upsert %s 行 → %s（键 month, person_name；补贴/奖金按库内已有值保留）"
+          % (written, TARGET_TABLE))
     return 0
 
 

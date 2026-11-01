@@ -23,12 +23,19 @@
     与 2000 不同的自定义底薪整笔记入 basic，全勤/拉新 = 0。
   - gross = base + door + online + store + accessories。
 
-名单来源：
-  - 默认 JSON：--active-roster。样例见同目录 active_roster.example.json。
+名单来源（二选一，禁止合并）：
+  - 默认只读库：不传 --active-roster 时 GET public.employees，
+    employment_status=在职。映射 person_name、work_role→role（上门|门店）、
+    base_salary。显式 --roster-from=employees 或 ROSTER_SOURCE=employees 同义。
+    凭据只从环境读取：SUPABASE_URL（或 NEXT_PUBLIC_SUPABASE_URL）与
+    SUPABASE_SERVICE_ROLE_KEY。不写 employees，不写草案表。
+  - 离线兜底：显式 --active-roster JSON（或 --roster-from=json / ROSTER_SOURCE=json）。
+    不读库。与员工表同时指定则拒绝。样例见同目录 active_roster.example.json。
     在职角色名单不要复制进本文件或文档。
-  - 可选只读库：--roster-from=employees 或环境变量 ROSTER_SOURCE=employees。
-    GET public.employees 中 employment_status=在职 的 person_name / work_role /
-    base_salary。缺 work_role 仍拒绝出草案。本脚本不写 employees，不写草案表。
+
+补贴 subsidy、奖金 bonus：本脚本每人写成 0。应发
+  gross = base + door + online + store + accessories + subsidy + bonus。
+手填值在 salary_realtime_draft，由 apply 保留；这里不读那两列。
 
 硬排除 HARD_EXCLUDED = 吕文飞、杨燕辉（退出码 3，不出草案）。
 张浩冉、张静怡已移出硬排除；是否计薪只看名单里的 role。
@@ -49,14 +56,17 @@ JSON 形状（不接受字符串姓名；示例用假名，不是在职名单）
   role=上门 时算数强制底薪 0，JSON 里的 2000 不会进应发。
 
 用法：
+  # 默认：只读在职员工表（不写库）
+  SUPABASE_URL=https://<project>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<key> \\
+    python3 scripts/payroll/realtime_payroll.py \\
+    --input <本机旧机订单.xlsx> --month 2026-10 \\
+    --accessories-input <本机配件导出.csv> \\
+    --out-dir <本机目录>
+  # 离线：只读 JSON，不连库，不与员工表合并
   python3 scripts/payroll/realtime_payroll.py \\
     --input <本机旧机订单.xlsx> --month 2026-10 \\
     --active-roster <本机名单.json> \\
-    --accessories-input <本机配件导出.csv> \\
     --out-dir <本机目录>
-  ROSTER_SOURCE=employees python3 scripts/payroll/realtime_payroll.py \\
-    --input <本机旧机订单.xlsx> --month 2026-10 \\
-    --roster-from=employees --out-dir <本机目录>
 
 个人级输出只落 --out-dir，禁止入仓。stdout 只打印汇总，不打印个人清单。
 退出码：0 成功；2 早于生效月；3 计薪名单含硬排除；4 名单/角色拒绝出草案；1 其它。
@@ -236,6 +246,10 @@ def parse_roster_document(doc):
             base, custom = classify_base(item.get("base_salary"), provided)
         except DraftRejected:
             raise DraftRejected("拒绝出草案：%s 的 base_salary 不是合法金额" % name)
+        if role == "上门":
+            # 老板原话：上门底薪强制 0，表内或 JSON 的 base_salary 不采用。
+            base = Decimal("0")
+            custom = False
         people[name] = {"name": name, "role": role, "base_salary": base, "custom_base": custom}
     reasons = {}
     excluded = doc.get("excluded") or []
@@ -285,23 +299,25 @@ def parse_employee_rows(rows):
 
 
 def resolve_roster_source(args, env):
+    """默认 employees。JSON 仅在显式指定时使用。两种来源禁止合并。"""
     cli = (args.roster_from or "").strip()
     env_src = str(env.get("ROSTER_SOURCE") or "").strip()
     if cli and env_src and cli != env_src:
         raise DraftRejected(
             "拒绝出草案：ROSTER_SOURCE=%s 与 --roster-from=%s 冲突" % (env_src, cli))
-    source = cli or env_src or "json"
-    if source not in ("json", "employees"):
+    source = cli or env_src
+    if source and source not in ("json", "employees"):
         raise DraftRejected("拒绝出草案：名单来源 %r 只接受 json 或 employees" % source)
-    if source == "json" and args.active_roster:
-        return "json"
-    if source == "employees" and args.active_roster:
+    has_json = bool(args.active_roster)
+    if source == "employees" and has_json:
         raise DraftRejected(
-            "拒绝出草案：--roster-from=employees 时不要同时传 --active-roster")
-    if source == "employees":
-        return "employees"
-    raise DraftRejected(
-        "拒绝出草案：未提供带 role 的在职名单（--active-roster）。禁止默认角色")
+            "拒绝出草案：员工表名单与 --active-roster 不能同时使用，禁止合并")
+    if source == "json" or has_json:
+        if not has_json:
+            raise DraftRejected(
+                "拒绝出草案：离线名单需要 --active-roster。禁止默认角色")
+        return "json"
+    return "employees"
 
 
 def load_roster(args, env, employees_fetcher):
@@ -316,7 +332,7 @@ def load_roster(args, env, employees_fetcher):
             raise DraftRejected("拒绝出草案：在职名单不是合法 JSON")
         people, reasons = parse_roster_document(doc)
         return people, reasons, "json", str(path.resolve())
-    # 只读 employees。JSON 仍是默认。不在这里写库，也不读 salary_detail_import / salary_monthly。
+    # 默认只读 employees。不写库，不读 salary_detail_import / salary_monthly，不并 JSON。
     reader = employees_fetcher or default_employees_fetcher
     rows = reader(env)
     people, reasons = parse_employee_rows(rows)
@@ -478,9 +494,9 @@ def base_view(person, roster, exceptions):
     base = info["base_salary"]
     if info["custom_base"]:
         return base, {"basic": base, "attendance": Decimal("0"), "new_customer": Decimal("0")}, (
-            "名单自定义底薪（整笔记入 basic，全勤与拉新为 0）")
+            "自定义底薪（员工表或离线名单，整笔记入 basic，全勤与拉新为 0）")
     return base, dict(BASE_BREAKDOWN), (
-        "名单缺省2000（基础1000+全勤500+拉新500），不做1–9月个人例外")
+        "底薪缺省2000（基础1000+全勤500+拉新500），不做1–9月个人例外")
 
 
 def main(argv=None, env=None, employees_fetcher=None):
@@ -492,11 +508,13 @@ def main(argv=None, env=None, employees_fetcher=None):
     ap.add_argument("--base-exceptions", default=None,
                     help="非现行路径：覆盖名单底薪。缺省不读。不得当作现行默认")
     ap.add_argument("--active-roster", default=None,
-                    help="在职名单 JSON：active 为 {name|person_name, role, base_salary?}。"
-                         "缺 role 拒绝出草案。不接受仅姓名列表")
+                    help="离线在职名单 JSON：active 为 {name|person_name, role, base_salary?}。"
+                         "传入后不读 employees。缺 role 拒绝出草案。不接受仅姓名列表。"
+                         "与 --roster-from=employees / ROSTER_SOURCE=employees 不能同时使用")
     ap.add_argument("--roster-from", default=None, choices=["json", "employees"],
-                    help="名单来源。默认 json（须 --active-roster）。"
-                         "employees=只读 public.employees 在职行。环境变量 ROSTER_SOURCE 同义，冲突则拒绝")
+                    help="名单来源。默认 employees（只读 public.employees 在职行，"
+                         "凭据 SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY）。"
+                         "json 须同时给 --active-roster。环境变量 ROSTER_SOURCE 同义，冲突则拒绝")
     ap.add_argument("--accessories-input", default=None,
                     help="配件独立导出（csv/xlsx）：归属人或销售人、实付金额、日期。"
                          "缺文件则配件=0 并注明。禁止用旧机 191 列冒充")
@@ -713,7 +731,12 @@ def main(argv=None, env=None, employees_fetcher=None):
             "profit_missing_rows": a["profit_missing"],
             "base_amt_missing_rows": a["base_amt_missing"],
         }
-        row["gross"] = float(money(base + door_comm + online_comm + store_comm_m + acc_comm))
+        subsidy = Decimal("0")
+        bonus = Decimal("0")
+        row["subsidy"] = float(money(subsidy))
+        row["bonus"] = float(money(bonus))
+        row["gross"] = float(money(
+            base + door_comm + online_comm + store_comm_m + acc_comm + subsidy + bonus))
         people.append(row)
 
     total_orders = sum(p["orders"] for p in people)
@@ -749,17 +772,20 @@ def main(argv=None, env=None, employees_fetcher=None):
         "零单在职人员仍出一行：上门底薪为 0，门店为名单底薪",
         "硬排除仅吕文飞、杨燕辉。张浩冉、张静怡已移出硬排除，出现在计薪名单不再因此中止",
         "分润金额或实付金额为空的行按缺失不补值，不计入对应基数",
-        "gross = base + door + online + store + accessories",
+        "gross = base + door + online + store + accessories + subsidy + bonus。"
+        "本脚本 subsidy 与 bonus 写成 0；手填值在 salary_realtime_draft，灌数时保留，这里不读",
     ]
     if exceptions:
         assumptions.append(
             "本跑注入了 --base-exceptions（非现行路径）。现行底薪以名单为准；本文件仅供对照")
     if roster_source == "employees":
         assumptions.append(
-            "名单来源 employees：employment_status=在职 的 work_role 与 base_salary。"
-            "只读，未写库。缺 work_role 的在职行会拒绝出草案")
+            "名单来源 employees（默认）：employment_status=在职 的 work_role 与 base_salary。"
+            "只读，未写库，未与 JSON 合并。缺 work_role 的在职行会拒绝出草案。"
+            "上门底薪忽略表内 base_salary")
     else:
-        assumptions.append("名单来源 JSON（过渡）。日后可改 --roster-from=employees，本文件不把角色写死")
+        assumptions.append(
+            "名单来源 JSON（离线/显式 --active-roster）。未读 employees，未与表合并")
 
     meta = {
         "draft": True,
@@ -819,6 +845,8 @@ def main(argv=None, env=None, employees_fetcher=None):
         "store_commission_total": float(money(sum((Decimal(str(p["store_commission"])) for p in people), Decimal("0")))),
         "accessories_paid_total": float(money(sum((Decimal(str(p["accessories_paid"])) for p in people), Decimal("0")))),
         "accessories_commission_total": float(money(sum((Decimal(str(p["accessories_commission"])) for p in people), Decimal("0")))),
+        "subsidy_total": float(money(sum((Decimal(str(p["subsidy"])) for p in people), Decimal("0")))),
+        "bonus_total": float(money(sum((Decimal(str(p["bonus"])) for p in people), Decimal("0")))),
         "gross_total": float(money(sum((Decimal(str(p["gross"])) for p in people), Decimal("0")))),
         "excluded_people": len(excluded_agg),
         "excluded_orders": excluded_orders,
@@ -846,6 +874,7 @@ def main(argv=None, env=None, employees_fetcher=None):
                     "分润计入单量", "分润基数", "上门提成(50%·上门角色全部订单)",
                     "线上单量", "线上金额(不含券)", "线上提成(1%)",
                     "门店提成基数", "门店提成", "配件实付", "配件提成(实付×30%)",
+                    "补贴", "奖金",
                     "分润合计", "应发草案合计", "分润缺失行", "不含券缺失行"])
         for p in people:
             w.writerow([month, p["person"], p["role"], p["orders"], p["base_salary"],
@@ -853,7 +882,8 @@ def main(argv=None, env=None, employees_fetcher=None):
                         p["base_breakdown"]["new_customer"], p["door_orders"], p["door_profit"],
                         p["door_commission"], p["online_orders"], p["online_amt"],
                         p["online_commission"], p["store_base_amt"], p["store_commission"],
-                        p["accessories_paid"], p["accessories_commission"], p["profit_total"],
+                        p["accessories_paid"], p["accessories_commission"],
+                        p["subsidy"], p["bonus"], p["profit_total"],
                         p["gross"], p["profit_missing_rows"], p["base_amt_missing_rows"]])
 
     print("输入 %d 行 → 月份 %s 内 %d 行（月外 %d 行）" % (len(rows), month, len(in_month), out_month))
@@ -869,10 +899,11 @@ def main(argv=None, env=None, employees_fetcher=None):
               % (s, STORE_IDS.get(s, ""), store_count[s], money(store_base[s]),
                  float(store_rate[s] * 100), money(store_excluded_door[s]),
                  money(store_profit_base[s]), float(store_rate_ref[s] * 100)))
-    print("人数 %d；应发草案合计 %s = 底薪 %s + 上门提成 %s + 线上提成 %s + 门店提成 %s + 配件提成 %s"
+    print("人数 %d；应发草案合计 %s = 底薪 %s + 上门提成 %s + 线上提成 %s + 门店提成 %s + 配件提成 %s + 补贴 %s + 奖金 %s"
           % (totals["people"], totals["gross_total"], totals["base_salary_total"],
              totals["door_commission_total"], totals["online_commission_total"],
-             totals["store_commission_total"], totals["accessories_commission_total"]))
+             totals["store_commission_total"], totals["accessories_commission_total"],
+             totals["subsidy_total"], totals["bonus_total"]))
     if accessory_meta["source"] == "none":
         print("配件：缺源，提成合计 0（见 assumptions，未用 191 列估算）")
     print("个人级输出（仅本机）：%s / .csv" % (out_dir / ("payroll_%s.json" % month)))
