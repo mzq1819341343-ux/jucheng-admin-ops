@@ -8,23 +8,32 @@
 pipeline_config.json 的 APPLY 保持 false。本脚本只读该键、不改文件，
 写库也不靠它放行（与 auto_fetch 的 UPLOAD/APPLY 暂缓不是同一道开关）。
 
-只写表 salary_realtime_draft。只处理 Asia/Shanghai 当月（可用 pipeline
-配置 TIMEZONE）。冲突键 (month, person_name)。不删除未出现在本次产出里的行。
+只写表 salary_realtime_draft。默认只处理 Asia/Shanghai 日历当月（可用
+pipeline 配置 TIMEZONE）。可选 --month YYYY-MM 指定终数回写月：此时目标月
+以该参数为准，payroll JSON 的 meta.month 必须与之相同。省略 --month 时行为
+不变，仍只接受日历当月。写库仍须双闸同时打开，--month 不是第三道闸，也不能
+单独放行。冲突键 (month, person_name)。不删除未出现在本次产出里的行。
 不写 role 列（表上没有）。新口径标签若出现在 payroll meta.caliber，只写进 caliber 文本。
-双闸逻辑不改。不碰 salary_detail_import / salary_monthly。
+双闸逻辑不改。不碰 salary_detail_import / salary_monthly。不改 pipeline_config
+的 UPLOAD / APPLY。
 
 用法：
   python3 scripts/apply_realtime_payroll_draft.py \\
     --input ~/Desktop/05_Muse督工/payroll_193/payroll_2026-10.json
   ALLOW_APPLY_REALTIME_DRAFT=true python3 scripts/apply_realtime_payroll_draft.py \\
     --input <payroll JSON> --apply
+  # 日历已跨月、回写已结月（例：2026-11 回写 2026-10）。无双闸则仍是 dry-run：
+  python3 scripts/apply_realtime_payroll_draft.py \\
+    --input <payroll JSON> --month 2026-10
+  ALLOW_APPLY_REALTIME_DRAFT=true python3 scripts/apply_realtime_payroll_draft.py \\
+    --input <payroll JSON> --month 2026-10 --apply
 
 写库还需 SUPABASE_URL（或 NEXT_PUBLIC_SUPABASE_URL）与
 SUPABASE_SERVICE_ROLE_KEY。密钥只从环境读取，不进 argv、不进仓库。
-stdout 只打印汇总锚点，不打印个人清单。
+stdout 只打印汇总锚点，不打印个人清单。显式 --month 时会标明终数回写月。
 
-退出码：0 成功（含 dry-run）；2 不是当月或早于生效月；3 计薪名单含硬排除人员；
-1 其它错误。
+退出码：0 成功（含 dry-run）；2 月份不符（不是当月、与 --month 不一致，或早于生效月）；
+3 计薪名单含硬排除人员；1 其它错误。
 """
 
 import argparse
@@ -91,6 +100,21 @@ def current_month(now, tz_name):
     return now.strftime("%Y-%m")
 
 
+def resolve_target_month(explicit, now, tz_name):
+    """返回 (month, explicit_month)。
+
+    省略 --month 时仍是日历当月。传入时只校验 YYYY-MM，不改写库闸。
+    """
+    if explicit is None:
+        return current_month(now, tz_name), False
+    month = str(explicit).strip()
+    if not MONTH_RE.match(month):
+        raise RuntimeError("--month 须为 YYYY-MM，收到 %s" % explicit)
+    if not 1 <= int(month[5:7]) <= 12:
+        raise RuntimeError("--month 须为 YYYY-MM，收到 %s" % explicit)
+    return month, True
+
+
 def money(value):
     if value is None or value == "":
         return Decimal("0.00")
@@ -140,7 +164,7 @@ def build_caliber(meta):
     return base + "|" + "|".join(extra)
 
 
-def rows_from_payload(payload, month, as_of_iso):
+def rows_from_payload(payload, month, as_of_iso, explicit_month=False):
     if not isinstance(payload, dict):
         raise RuntimeError("payroll JSON 须为对象")
     meta = payload.get("meta") or {}
@@ -150,6 +174,10 @@ def rows_from_payload(payload, month, as_of_iso):
     if not MONTH_RE.match(file_month):
         raise RuntimeError("payroll JSON 缺少合法 meta.month（YYYY-MM）")
     if file_month != month:
+        if explicit_month:
+            raise RuntimeError(
+                "只处理指定月 %s（终数回写月 / explicit month），产出月份是 %s"
+                % (month, file_month))
         raise RuntimeError("只处理当月 %s，产出月份是 %s" % (month, file_month))
     people = payload.get("people")
     if not isinstance(people, list):
@@ -274,6 +302,10 @@ def _as_of_iso(now, tz_name):
 def main(argv=None, env=None, writer=None, now=None):
     ap = argparse.ArgumentParser(description="实时工资草案灌入 salary_realtime_draft（默认 dry-run）")
     ap.add_argument("--input", required=True, help="realtime_payroll 产出的 payroll_<month>.json")
+    ap.add_argument("--month", default=None,
+                    help="终数回写月 YYYY-MM。省略则只处理日历当月；"
+                         "传入后以该月为目标，且 meta.month 必须相同。"
+                         "写库仍须 ALLOW_APPLY_REALTIME_DRAFT=true 与 --apply")
     ap.add_argument("--apply", action="store_true",
                     help="与 ALLOW_APPLY_REALTIME_DRAFT=true 同时成立才写库；否则 dry-run")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG),
@@ -290,7 +322,11 @@ def main(argv=None, env=None, writer=None, now=None):
     cfg = load_pipeline_config(cfg_path)
     config_apply = bool(cfg.get("APPLY", False))
     tz_name = cfg.get("TIMEZONE") or "Asia/Shanghai"
-    month = current_month(now, tz_name)
+    try:
+        month, explicit_month = resolve_target_month(args.month, now, tz_name)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     gate_env = env_gate_open(env)
     will_write = bool(args.apply) and gate_env
 
@@ -302,10 +338,11 @@ def main(argv=None, env=None, writer=None, now=None):
         print("月份 %s 早于生效月 %s，不灌数" % (file_month, pay.EFFECTIVE_FROM), file=sys.stderr)
         return 2
     try:
-        rows = rows_from_payload(payload, month, _as_of_iso(now, tz_name))
+        rows = rows_from_payload(
+            payload, month, _as_of_iso(now, tz_name), explicit_month=explicit_month)
     except RuntimeError as exc:
         message = str(exc)
-        if message.startswith("只处理当月"):
+        if message.startswith("只处理当月") or message.startswith("只处理指定月"):
             print(message, file=sys.stderr)
             return 2
         print(message, file=sys.stderr)
@@ -316,7 +353,10 @@ def main(argv=None, env=None, writer=None, now=None):
         return 3
 
     totals = totals_of(rows)
-    print("月份 %s（当月，时区 %s）" % (month, tz_name))
+    if explicit_month:
+        print("月份 %s（终数回写月 / explicit month，时区 %s）" % (month, tz_name))
+    else:
+        print("月份 %s（当月，时区 %s）" % (month, tz_name))
     print("pipeline_config APPLY=%s（本脚本不修改该键；写库不靠它放行）"
           % str(config_apply).lower())
     print("双闸：%s=%s --apply=%s → %s" % (
@@ -343,7 +383,8 @@ def main(argv=None, env=None, writer=None, now=None):
             return postgrest_upsert(_url, _key, table, batch)
 
     if not rows:
-        print("当月产出 0 行，未发写请求。")
+        label = "指定月" if explicit_month else "当月"
+        print("%s产出 0 行，未发写请求。" % label)
         return 0
     try:
         written = writer(guard_table(TARGET_TABLE), rows)
