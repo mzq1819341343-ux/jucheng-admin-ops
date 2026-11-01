@@ -86,7 +86,7 @@ ALLOW_APPLY_REALTIME_DRAFT=true \
 
 补贴、奖金是人手填的。`migration_011` 还没有 `subsidy_amount` / `bonus_amount`，本仓不另写 migration。列由库侧加上之后，写库前会先 GET 当月这两列：已有值（包括 0）原样写回，不用算薪 JSON 里的 0 覆盖；本次新出现的人写成 0；只刷新底薪和四项提成，再重算 `gross_amount = 五项 + 保留的补贴 + 保留的奖金`。列还没落地时这次 GET 会失败，脚本中止、不 upsert。dry-run 不读这两列，打印的应发不含库里已经手填的补贴和奖金。
 
-员工在职保存成功后占位、底薪改完后同步当月草案，是另一条写路径，不跑抓数、也不改上面的算薪灌库。契约、参数和 web 调用方式见 `docs/契约_员工草案占位与底薪同步.md`。默认不写库。`2026-10` 拒绝写入。`UPLOAD` / `APPLY` 保持 false。
+员工在职保存成功后占位、底薪改完后同步当月草案，是另一条写路径，不跑抓数、也不改上面的算薪灌库。契约、参数和 web 调用方式见 `docs/契约_员工草案占位与底薪同步.md`。默认不写库。写库要 `ALLOW_EMPLOYEE_DRAFT_WRITE=true` 与 `--apply`，不共用上面的 `ALLOW_APPLY_REALTIME_DRAFT`。`2026-10` 拒绝写入。`UPLOAD` / `APPLY` 保持 false。web 在 Vercel 用服务端 Route 按同契约直写 draft，CLI 留给本机 / ops。
 
 ```bash
 python3 scripts/payroll/ensure_employee_placeholder.py \
