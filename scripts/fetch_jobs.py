@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""抓取任务的文件态队列。
+"""抓取任务队列。真源是表 salary_fetch_runs，本地 JSON 只是缓存。
 
-工资页只下发任务、只读上次结果。本模块把任务写成 JSON 文件，供 Mac 上的
-runner 认领和回写。这里不登录加盟后台，不发 HTTP，不写工资表，不把
-UPLOAD / APPLY 打开。
+工资页只下发任务、只读上次结果。Route 在 web 仓。本模块给 Mac 上的
+runner 做 claim / complete：有 SUPABASE_URL 与 service role 时写库；
+没有凭据时不连库，latest 回退读文件，写操作可把将写入的行打到标准错误。
+这里不登录加盟后台，不写工资表，不把 UPLOAD / APPLY / login 写成 true。
 
 契约：docs/契约_fetch-jobs.md
 前端解析：jucheng-admin-web lib/fetch-jobs.ts
@@ -25,6 +26,9 @@ import re
 import secrets
 import socket
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -44,7 +48,14 @@ FAIL_MESSAGE = "占位失败，未登录加盟后台"
 SCOPES = ("all", "accessories")
 LEG_NAMES = ("old_machine", "accessories")
 LEG_STATUSES = ("pending", "running", "success", "failed")
+JOB_STATUSES = ("queued", "running", "success", "failed")
 JOB_ID_RE_TEXT = r"^fj_\d{8}T\d{6}_[0-9a-f]{6}$"
+TABLE = "salary_fetch_runs"
+SELECT_COLUMNS = (
+    "job_id,month,scope,status,started_at,finished_at,"
+    "old_machine,accessories,claimed_by,dry,upload,apply,login,"
+    "created_at,updated_at"
+)
 
 REFUSE_REAL = (
     "实抓须在 Mac 上用保险柜登录加盟后台 "
@@ -56,7 +67,7 @@ REFUSE_REAL = (
 _JOB_ID_RE = re.compile(JOB_ID_RE_TEXT)
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
-_APPLY_KEYS = {"apply", "upload"}
+_GATE_KEYS = {"apply", "upload", "login"}
 _SECRET_KEYS = {
     "password", "passwd", "cookie", "cookies", "set-cookie",
     "token", "authorization", "secret", "credential", "credentials",
@@ -64,12 +75,19 @@ _SECRET_KEYS = {
 
 __all__ = [
     "JobError",
+    "TABLE",
     "resolve_jobs_dir",
     "create_job",
     "latest_payload",
     "claim_job",
     "complete_job",
     "run_once",
+    "open_db",
+    "build_insert_row",
+    "build_claim_patch",
+    "build_complete_patch",
+    "latest_rest_query",
+    "public_latest_from_row",
     "main",
 ]
 
@@ -93,13 +111,19 @@ def resolve_jobs_dir(jobs_dir=None):
     return Path.home() / "Desktop" / "05_Muse督工" / "fetch_jobs"
 
 
-def create_job(month, scope, jobs_dir=None, now=None):
-    """写入一条 queued 任务，返回 {"job_id": ...}。月份或范围不合法时抛 JobError。"""
+def create_job(
+    month, scope, jobs_dir=None, now=None, *,
+    db=None, env=None, transport=None, db_dry_run=None,
+):
+    """写入一条 queued 任务，返回 {"job_id": ...}。月份或范围不合法时抛 JobError。
+
+    有库凭据时同时插入 salary_fetch_runs。没有凭据时只写文件缓存。
+    """
     _guard_phase()
     month = _require_month(month)
     scope = _require_scope(scope)
+    db = _coerce_db(db, env, transport, db_dry_run)
     root = resolve_jobs_dir(jobs_dir)
-    root.mkdir(parents=True, exist_ok=True)
     stamp = _coerce_now(now)
     created = _format_time(stamp)
     job_id, path = _allocate_id(root, stamp)
@@ -122,16 +146,29 @@ def create_job(month, scope, jobs_dir=None, now=None):
         "apply": False,
         "login": False,
     }
-    _write_job(path, job)
+    row = build_insert_row(job)
+    if db.enabled:
+        db.insert(row)
+        _cache_job(jobs_dir, job)
+    else:
+        db.note("insert", row)
+        _write_job(path, job)
     return {"job_id": job_id}
 
 
-def latest_payload(month, jobs_dir=None):
+def latest_payload(
+    month, jobs_dir=None, *,
+    db=None, env=None, transport=None, db_dry_run=None,
+):
     """该月 created_at 最新的一条，包成 {"latest": ...}。没有记录时 {"latest": null}。
 
-    不创建目录。排队中的任务也算最近一次。
+    有库凭据时只读表，不看文件。没有凭据时读缓存，且不创建目录。
+    排队中的任务也算最近一次。
     """
     month = _require_month(month)
+    db = _coerce_db(db, env, transport, db_dry_run)
+    if db.enabled:
+        return public_latest_from_row(db.latest(month))
     root = resolve_jobs_dir(jobs_dir)
     chosen = None
     for job in _load_all(root):
@@ -144,96 +181,63 @@ def latest_payload(month, jobs_dir=None):
     return {"latest": _public_job(chosen)}
 
 
-def claim_job(job_id, jobs_dir=None, now=None, claimer=None):
-    """queued → running，并留下锁。别的 runner 抢不到同一条。"""
+def claim_job(
+    job_id, jobs_dir=None, now=None, claimer=None, *,
+    db=None, env=None, transport=None, db_dry_run=None,
+):
+    """queued → running。有库时用 status=queued 的条件更新当锁。"""
     _guard_phase()
     job_id = _require_job_id(job_id)
+    db = _coerce_db(db, env, transport, db_dry_run)
+    who = _claimer_name(claimer)
+    stamp = _format_time(_coerce_now(now))
+    if db.enabled:
+        return _claim_live(db, job_id, jobs_dir, who, stamp)
     root = resolve_jobs_dir(jobs_dir)
     path = _job_path(root, job_id)
     if not path.is_file():
         raise JobError("任务不存在")
-    who = _claimer_name(claimer)
     _acquire_lock(root, job_id, who)
     try:
         job = _read_job(path)
-        _reject_armed(job)
-        if job.get("status") != "queued":
-            raise JobError("任务不是 queued，不能认领")
-        _require_scope(job.get("scope"))
-        _require_month(job.get("month"))
-        stamp = _format_time(_coerce_now(now))
-        job["status"] = "running"
-        job["started_at"] = stamp
-        job["updated_at"] = stamp
-        job["claimed_by"] = who
-        for name in _leg_names(job):
-            job[name] = _running_leg()
+        _prepare_claim(job, who, stamp)
         _write_job(path, job)
     except Exception:
         _release_lock(root, job_id)
         raise
-    return {
-        "job_id": job_id,
-        "status": "running",
-        "login": False,
-        "upload": False,
-        "apply": False,
-    }
+    db.note("update", build_claim_patch(job), job_id=job_id, match_status="queued")
+    return _claim_payload(job_id)
 
 
-def complete_job(job_id, results, jobs_dir=None, now=None, dry=False):
-    """running → success 或 failed。只改文件，不抓数、不登录。
+def complete_job(
+    job_id, results, jobs_dir=None, now=None, dry=False, *,
+    db=None, env=None, transport=None, db_dry_run=None,
+):
+    """running → success 或 failed。有库时回写腿 jsonb 和 finished_at。
 
     results 的键是 old_machine / accessories。ok 或 status 表示成败，
     row_count（也认 rows / count）是行数。失败要带 error。
-    范围以外的腿、凭据、UPLOAD / APPLY 都会拒绝，文件保持原样。
+    范围内缺腿记 failed，不用 rows=0 冒充成功。范围以外的腿、凭据、
+    UPLOAD / APPLY / login 都会拒绝，原记录保持不动。
     """
     _guard_phase()
     job_id = _require_job_id(job_id)
     if not isinstance(results, dict):
         raise JobError("回写结果格式不正确")
     _reject_forbidden(results)
+    db = _coerce_db(db, env, transport, db_dry_run)
+    if db.enabled:
+        return _complete_live(db, job_id, results, jobs_dir, dry, now)
     root = resolve_jobs_dir(jobs_dir)
     path = _job_path(root, job_id)
     if not path.is_file():
         raise JobError("任务不存在")
     job = _read_job(path)
-    _reject_armed(job)
-    if job.get("status") != "running":
-        raise JobError("只有 running 的任务可以回写")
-    names = _leg_names(job)
-    if not names:
-        raise JobError("任务没有要回写的腿")
-    for key in LEG_NAMES:
-        if key in results and key not in names:
-            raise JobError("回写了本次范围以外的腿")
-    for name in names:
-        if name not in results:
-            job[name] = {
-                "status": "failed",
-                "row_count": 0,
-                "error": "未回写",
-                "message": None,
-            }
-        else:
-            job[name] = _result_leg(results[name], dry=dry)
-    job["status"] = (
-        "success" if all(job[name]["status"] == "success" for name in names) else "failed"
-    )
-    stamp = _format_time(_coerce_now(now))
-    job["finished_at"] = stamp
-    job["updated_at"] = stamp
-    job["dry"] = bool(dry)
+    _apply_results(job, results, dry, now)
     _write_job(path, job)
     _release_lock(root, job_id)
-    return {
-        "job_id": job_id,
-        "status": job["status"],
-        "dry": bool(dry),
-        "login": False,
-        "upload": False,
-        "apply": False,
-    }
+    db.note("update", build_complete_patch(job), job_id=job_id, match_status="running")
+    return _complete_payload(job, dry)
 
 
 def run_once(
@@ -246,10 +250,16 @@ def run_once(
     error=None,
     now=None,
     claimer=None,
+    *,
+    db=None,
+    env=None,
+    transport=None,
+    db_dry_run=None,
 ):
     """占位 runner。dry 为真时：认领最早的 queued，回写占位行数。
 
-    不加 dry 时不认领、不改文件。返回 (payload, exit_code)。
+    有库凭据时从 salary_fetch_runs 选 queued，并把 dry 写成 true。
+    不加 dry 时不认领、不改文件、不写库。返回 (payload, exit_code)。
     """
     _guard_phase()
     if not dry:
@@ -262,18 +272,28 @@ def run_once(
             "error": REFUSE_REAL,
         }, 2
 
+    db = _coerce_db(db, env, transport, db_dry_run)
     root = resolve_jobs_dir(jobs_dir)
-    actionable, skipped = _split_queued(root)
-    if job_id:
-        job_id = _require_job_id(job_id)
-        path = _job_path(root, job_id)
-        if not path.is_file():
-            raise JobError("任务不存在")
-        target = _read_job(path)
-        if target.get("status") != "queued":
-            raise JobError("任务不是 queued，不能认领")
-        _reject_armed(target)
-    elif not actionable:
+    if db.enabled:
+        actionable, skipped, target, job_id = _pick_live(db, job_id)
+    else:
+        actionable, skipped = _split_queued(root)
+        target = None
+        if job_id:
+            job_id = _require_job_id(job_id)
+            path = _job_path(root, job_id)
+            if not path.is_file():
+                raise JobError("任务不存在")
+            target = _read_job(path)
+            if target.get("status") != "queued":
+                raise JobError("任务不是 queued，不能认领")
+            _reject_armed(target)
+        elif not actionable:
+            target = None
+        else:
+            target = actionable[0]
+            job_id = target["job_id"]
+    if target is None:
         payload = {
             "ok": True,
             "claimed": False,
@@ -284,9 +304,6 @@ def run_once(
         if skipped:
             payload["skipped_forbidden"] = skipped
         return payload, 0
-    else:
-        target = actionable[0]
-        job_id = target["job_id"]
 
     names = _leg_names(target)
     if not names:
@@ -303,13 +320,14 @@ def run_once(
             results[name] = {"ok": True, "row_count": counts[name]}
 
     started = _coerce_now(now)
-    claim_job(job_id, jobs_dir=root, now=started, claimer=claimer)
+    claim_job(job_id, jobs_dir=root, now=started, claimer=claimer, db=db)
     done = complete_job(
         job_id,
         results,
         jobs_dir=root,
         now=started + timedelta(seconds=1),
         dry=True,
+        db=db,
     )
     payload = {
         "ok": True,
@@ -347,16 +365,29 @@ def main(argv=None):
 
 def _execute(args):
     jobs_dir = args.jobs_dir
-    if args.cmd == "create":
-        return create_job(args.month, args.scope, jobs_dir=jobs_dir), 0
-    if args.cmd == "latest":
-        return latest_payload(args.month, jobs_dir=jobs_dir), 0
-    if args.cmd == "claim":
-        return claim_job(args.job_id, jobs_dir=jobs_dir), 0
-    if args.cmd == "complete":
-        return complete_job(args.job_id, _parse_results(args.results), jobs_dir=jobs_dir), 0
-    if args.cmd == "run":
+    if args.cmd == "run" and not args.dry:
         return run_once(
+            jobs_dir=jobs_dir,
+            job_id=args.job_id,
+            dry=False,
+            fixture=args.fixture,
+            fail=args.fail,
+            fail_leg=args.fail_leg,
+            error=args.error,
+        )
+    db = open_db(db_dry_run=True if args.db_dry_run else None)
+    if args.cmd == "create":
+        payload, code = create_job(args.month, args.scope, jobs_dir=jobs_dir, db=db), 0
+    elif args.cmd == "latest":
+        payload, code = latest_payload(args.month, jobs_dir=jobs_dir, db=db), 0
+    elif args.cmd == "claim":
+        payload, code = claim_job(args.job_id, jobs_dir=jobs_dir, db=db), 0
+    elif args.cmd == "complete":
+        payload, code = complete_job(
+            args.job_id, _parse_results(args.results), jobs_dir=jobs_dir, db=db,
+        ), 0
+    elif args.cmd == "run":
+        payload, code = run_once(
             jobs_dir=jobs_dir,
             job_id=args.job_id,
             dry=args.dry,
@@ -364,17 +395,26 @@ def _execute(args):
             fail=args.fail,
             fail_leg=args.fail_leg,
             error=args.error,
+            db=db,
         )
-    raise JobError("参数不正确")
+    else:
+        raise JobError("参数不正确")
+    _emit_preview(db)
+    return payload, code
 
 
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="fetch_jobs.py",
-        description="抓取任务文件态。不登录、不 APPLY。契约见 docs/契约_fetch-jobs.md。",
+        description="抓取任务。真源是 salary_fetch_runs。不登录、不 APPLY。契约见 docs/契约_fetch-jobs.md。",
         exit_on_error=False,
     )
-    parser.add_argument("--jobs-dir", default=None, help="任务目录，优先于 FETCH_JOBS_DIR")
+    parser.add_argument("--jobs-dir", default=None, help="缓存目录，优先于 FETCH_JOBS_DIR")
+    parser.add_argument(
+        "--db-dry-run",
+        action="store_true",
+        help="不连库，把将写入 salary_fetch_runs 的内容打到标准错误",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     create = sub.add_parser("create", help="写入 queued 任务并打印 job_id", exit_on_error=False)
@@ -570,7 +610,7 @@ def _public_job(job):
 
 
 def _reject_armed(job):
-    if job.get("upload") or job.get("apply"):
+    if job.get("upload") or job.get("apply") or job.get("login"):
         raise JobError("禁止 UPLOAD / APPLY")
 
 
@@ -578,7 +618,7 @@ def _reject_forbidden(value):
     if isinstance(value, dict):
         for key, item in value.items():
             name = str(key).strip().lower()
-            if name in _APPLY_KEYS and item:
+            if name in _GATE_KEYS and item:
                 raise JobError("禁止 UPLOAD / APPLY")
             if name in _SECRET_KEYS:
                 raise JobError("回写不能带凭据")
@@ -671,7 +711,7 @@ def _split_queued(root):
     for job in _load_all(root):
         if job.get("status") != "queued":
             continue
-        if job.get("upload") or job.get("apply"):
+        if job.get("upload") or job.get("apply") or job.get("login"):
             skipped.append(job.get("job_id"))
             continue
         actionable.append(job)
@@ -717,6 +757,556 @@ def _parse_results(text):
     if not isinstance(data, dict):
         raise JobError("回写结果格式不正确")
     return data
+
+
+def _prepare_claim(job, who, stamp):
+    _reject_armed(job)
+    if job.get("status") != "queued":
+        raise JobError("任务不是 queued，不能认领")
+    scope = _require_scope(job.get("scope"))
+    _require_month(job.get("month"))
+    if scope == "accessories" and isinstance(job.get("old_machine"), dict):
+        raise JobError("回写了本次范围以外的腿")
+    job["status"] = "running"
+    job["started_at"] = stamp
+    job["updated_at"] = stamp
+    job["claimed_by"] = who
+    job["upload"] = False
+    job["apply"] = False
+    job["login"] = False
+    for name in _leg_names(job):
+        job[name] = _running_leg()
+
+
+def _apply_results(job, results, dry, now):
+    """把回写贴到任务上。范围内缺腿记 failed，不用 rows=0 记成成功。"""
+    _reject_armed(job)
+    if job.get("status") != "running":
+        raise JobError("只有 running 的任务可以回写")
+    scope = _require_scope(job.get("scope"))
+    if scope == "accessories" and isinstance(job.get("old_machine"), dict):
+        raise JobError("回写了本次范围以外的腿")
+    names = _leg_names(job)
+    if not names:
+        raise JobError("任务没有要回写的腿")
+    for key in LEG_NAMES:
+        if key in results and key not in names:
+            raise JobError("回写了本次范围以外的腿")
+    for name in names:
+        if name not in results:
+            job[name] = {
+                "status": "failed",
+                "row_count": 0,
+                "error": "未回写",
+                "message": None,
+            }
+        else:
+            job[name] = _result_leg(results[name], dry=dry)
+        if job[name]["status"] == "success" and name not in results:
+            raise JobError("缺腿不能记成成功")
+    job["status"] = (
+        "success" if all(job[name]["status"] == "success" for name in names) else "failed"
+    )
+    stamp = _format_time(_coerce_now(now))
+    job["finished_at"] = stamp
+    job["updated_at"] = stamp
+    job["dry"] = bool(dry)
+    job["upload"] = False
+    job["apply"] = False
+    job["login"] = False
+
+
+def _claim_payload(job_id):
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "login": False,
+        "upload": False,
+        "apply": False,
+    }
+
+
+def _complete_payload(job, dry):
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "dry": bool(dry),
+        "login": False,
+        "upload": False,
+        "apply": False,
+    }
+
+
+def _claim_live(db, job_id, jobs_dir, who, stamp):
+    row = db.get(job_id)
+    if row is None:
+        raise JobError("任务不存在")
+    job = _job_from_row(row)
+    _prepare_claim(job, who, stamp)
+    updated = db.update(job_id, "queued", build_claim_patch(job))
+    if updated is None:
+        raise JobError("任务已被认领")
+    _cache_job(jobs_dir, _job_from_row(updated))
+    return _claim_payload(job_id)
+
+
+def _complete_live(db, job_id, results, jobs_dir, dry, now):
+    row = db.get(job_id)
+    if row is None:
+        raise JobError("任务不存在")
+    job = _job_from_row(row)
+    _apply_results(job, results, dry, now)
+    updated = db.update(job_id, "running", build_complete_patch(job))
+    if updated is None:
+        raise JobError("只有 running 的任务可以回写")
+    stored = _job_from_row(updated)
+    _cache_job(jobs_dir, stored, release_lock=True)
+    return _complete_payload(stored, dry)
+
+
+def _pick_live(db, job_id):
+    if job_id:
+        job_id = _require_job_id(job_id)
+        row = db.get(job_id)
+        if row is None:
+            raise JobError("任务不存在")
+        if _row_armed(row):
+            raise JobError("禁止 UPLOAD / APPLY")
+        target = _job_from_row(row)
+        if target.get("status") != "queued":
+            raise JobError("任务不是 queued，不能认领")
+        return [], [], target, job_id
+    actionable, skipped = _split_queued_rows(db.queued())
+    if not actionable:
+        return actionable, skipped, None, None
+    target = actionable[0]
+    return actionable, skipped, target, target["job_id"]
+
+
+def _split_queued_rows(rows):
+    actionable = []
+    skipped = []
+    for row in rows:
+        if row.get("status") != "queued":
+            continue
+        if _row_armed(row):
+            skipped.append(row.get("job_id"))
+            continue
+        actionable.append(_job_from_row(row))
+    actionable.sort(key=_recency_key)
+    return actionable, skipped
+
+
+def _row_armed(row):
+    return bool(row.get("upload") or row.get("apply") or row.get("login"))
+
+
+def _cache_job(jobs_dir, job, release_lock=False):
+    """库已写成功之后的文件缓存。目录写不了时不推翻库里的结果。"""
+    try:
+        root = resolve_jobs_dir(jobs_dir)
+        _write_job(_job_path(root, job["job_id"]), job)
+    except OSError:
+        return
+    if release_lock:
+        try:
+            _release_lock(root, job["job_id"])
+        except OSError:
+            return
+
+
+def _is_row_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _leg_for_db(leg):
+    if leg is None:
+        return None
+    if not isinstance(leg, dict):
+        raise JobError("回写结果格式不正确")
+    status = leg.get("status")
+    if status not in LEG_STATUSES:
+        raise JobError("回写结果格式不正确")
+    out = {"status": status}
+    rows = leg.get("row_count", None)
+    if rows is None:
+        out["row_count"] = None
+    elif _is_row_count(rows):
+        out["row_count"] = rows
+    else:
+        out["row_count"] = _require_rows(rows)
+    err = leg.get("error")
+    message = leg.get("message")
+    if isinstance(err, str) and err.strip():
+        out["error"] = err.strip()
+    if isinstance(message, str) and message.strip():
+        out["message"] = message.strip()
+    if status == "success" and not _is_row_count(out.get("row_count")):
+        raise JobError("成功回写必须带行数")
+    if status == "success" and out.get("error"):
+        raise JobError("回写结果互相矛盾")
+    return out
+
+
+def _leg_from_db(leg):
+    if leg is None:
+        return None
+    if isinstance(leg, str):
+        try:
+            leg = json.loads(leg)
+        except json.JSONDecodeError as exc:
+            raise JobError("写库响应不正确") from exc
+    return _leg_for_db(leg)
+
+
+def _assert_scope_legs(scope, old, accessories):
+    if scope == "accessories":
+        if old is not None:
+            raise JobError("回写了本次范围以外的腿")
+        if not isinstance(accessories, dict):
+            raise JobError("任务没有要回写的腿")
+        return
+    if not isinstance(old, dict) or not isinstance(accessories, dict):
+        raise JobError("任务没有要回写的腿")
+
+
+def _require_gates_false(body):
+    if not isinstance(body, dict):
+        raise JobError("写库内容不正确", exit_code=1)
+    for key in ("upload", "apply", "login"):
+        if body.get(key) is not False:
+            raise JobError("禁止 UPLOAD / APPLY")
+    _reject_forbidden(body)
+
+
+def build_insert_row(job):
+    """拼一条 queued 插入行。upload / apply / login 只能是 false。"""
+    if job.get("upload") or job.get("apply") or job.get("login"):
+        raise JobError("禁止 UPLOAD / APPLY")
+    scope = _require_scope(job.get("scope"))
+    old = _leg_for_db(job.get("old_machine"))
+    accessories = _leg_for_db(job.get("accessories"))
+    _assert_scope_legs(scope, old, accessories)
+    row = {
+        "job_id": _require_job_id(job.get("job_id")),
+        "month": _require_month(job.get("month")),
+        "scope": scope,
+        "status": "queued",
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "old_machine": old,
+        "accessories": accessories,
+        "claimed_by": job.get("claimed_by"),
+        "dry": bool(job.get("dry")),
+        "upload": False,
+        "apply": False,
+        "login": False,
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    _require_gates_false(row)
+    return row
+
+
+def build_claim_patch(job):
+    """queued → running 的更新体。不改 dry，不带 created_at。"""
+    if job.get("upload") or job.get("apply") or job.get("login"):
+        raise JobError("禁止 UPLOAD / APPLY")
+    if job.get("status") != "running":
+        raise JobError("认领补丁要在状态改为 running 之后再拼", exit_code=1)
+    scope = _require_scope(job.get("scope"))
+    old = _leg_for_db(job.get("old_machine"))
+    accessories = _leg_for_db(job.get("accessories"))
+    _assert_scope_legs(scope, old, accessories)
+    patch = {
+        "status": "running",
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+        "claimed_by": job.get("claimed_by"),
+        "old_machine": old,
+        "accessories": accessories,
+        "upload": False,
+        "apply": False,
+        "login": False,
+    }
+    _require_gates_false(patch)
+    return patch
+
+
+def build_complete_patch(job):
+    """回写腿 jsonb、任务成败、finished_at、dry。"""
+    if job.get("upload") or job.get("apply") or job.get("login"):
+        raise JobError("禁止 UPLOAD / APPLY")
+    if job.get("status") not in ("success", "failed"):
+        raise JobError("只有 running 的任务可以回写")
+    scope = _require_scope(job.get("scope"))
+    old = _leg_for_db(job.get("old_machine"))
+    accessories = _leg_for_db(job.get("accessories"))
+    _assert_scope_legs(scope, old, accessories)
+    for leg in (old, accessories):
+        if isinstance(leg, dict) and leg.get("status") == "success" and leg.get("error"):
+            raise JobError("回写结果互相矛盾")
+    patch = {
+        "status": job["status"],
+        "finished_at": job.get("finished_at"),
+        "updated_at": job.get("updated_at"),
+        "dry": bool(job.get("dry")),
+        "old_machine": old,
+        "accessories": accessories,
+        "upload": False,
+        "apply": False,
+        "login": False,
+    }
+    _require_gates_false(patch)
+    return patch
+
+
+def latest_rest_query(month):
+    """同月按 created_at 倒序取一条。时间相同再比 job_id。"""
+    month = _require_month(month)
+    return "select=%s&month=eq.%s&order=created_at.desc,job_id.desc&limit=1" % (
+        SELECT_COLUMNS, urllib.parse.quote(month, safe=""),
+    )
+
+
+def _job_from_row(row):
+    if not isinstance(row, dict):
+        raise JobError("写库响应不正确")
+    if _row_armed(row):
+        raise JobError("禁止 UPLOAD / APPLY")
+    scope = _require_scope(row.get("scope"))
+    old = _leg_from_db(row.get("old_machine"))
+    accessories = _leg_from_db(row.get("accessories"))
+    if scope == "accessories" and old is not None:
+        raise JobError("写库响应不正确")
+    if scope == "all" and (old is None or accessories is None):
+        raise JobError("写库响应不正确")
+    status = row.get("status")
+    if status not in JOB_STATUSES:
+        raise JobError("写库响应不正确")
+    return {
+        "job_id": _require_job_id(row.get("job_id")),
+        "month": _require_month(row.get("month")),
+        "scope": scope,
+        "status": status,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "started_at": row.get("started_at"),
+        "finished_at": row.get("finished_at"),
+        "claimed_by": row.get("claimed_by"),
+        "dry": bool(row.get("dry")),
+        "entry_url": ENTRY_URL,
+        "source": SOURCE,
+        "old_machine": old,
+        "accessories": accessories,
+        "upload": False,
+        "apply": False,
+        "login": False,
+    }
+
+
+def public_latest_from_row(row):
+    """库行 → 与文件缓存相同的 {"latest": ...} 形状。row 为空时 latest 为 null。"""
+    if row is None:
+        return {"latest": None}
+    return {"latest": _public_job(_job_from_row(row))}
+
+
+def _env_flag(value):
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
+def open_db(env=None, transport=None, db_dry_run=None):
+    """有成对凭据且未要求演练时才连库。缺凭据是演练，不成对则拒绝。"""
+    if env is None:
+        env = os.environ
+    url = (env.get("SUPABASE_URL") or env.get("NEXT_PUBLIC_SUPABASE_URL") or "").strip().rstrip("/")
+    key = (env.get("SUPABASE_SERVICE_ROLE_KEY") or env.get("SUPABASE_SERVICE_ROLE") or "").strip()
+    if db_dry_run is None:
+        preview = _env_flag(env.get("FETCH_JOBS_DB_DRY_RUN"))
+    else:
+        preview = bool(db_dry_run)
+    if preview or (not url and not key):
+        return FetchRunDb(enabled=False, url="", key="", transport=transport)
+    if not url or not key:
+        raise JobError("写库需要 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY")
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or not parts.netloc or parts.path not in ("", "/"):
+        raise JobError("SUPABASE_URL 须为 https 的项目根地址")
+    if parts.username or parts.password:
+        raise JobError("SUPABASE_URL 不能带账号")
+    return FetchRunDb(enabled=True, url=url, key=key, transport=transport)
+
+
+def _coerce_db(db, env, transport, db_dry_run):
+    if db is not None:
+        return db
+    return open_db(env=env, transport=transport, db_dry_run=db_dry_run)
+
+
+def _emit_preview(db):
+    if db is None or db.enabled or not db.previews:
+        return
+    print(json.dumps({
+        "db_dry_run": True,
+        "table": TABLE,
+        "writes": db.previews,
+    }, ensure_ascii=False), file=sys.stderr)
+
+
+def _rest_url(base, query):
+    url = base.rstrip("/") + "/rest/v1/" + TABLE
+    if query:
+        url = url + "?" + query
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.path != "/rest/v1/" + TABLE:
+        raise JobError("只允许访问表 salary_fetch_runs")
+    return url
+
+
+class _NoRedirect(urllib.request.HTTPErrorProcessor):
+    def http_response(self, request, response):
+        return response
+
+    https_response = http_response
+
+
+def _exchange(method, url, key, body, prefer, transport):
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "apikey": key,
+        "Authorization": "Bearer " + key,
+        "Accept": "application/json",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if prefer:
+        headers["Prefer"] = prefer
+    if transport is not None:
+        try:
+            status, raw = transport(method, url, headers, data)
+        except JobError:
+            raise
+        except OSError as exc:
+            raise JobError("写库连接失败") from exc
+        return status, raw
+    return _urllib_exchange(method, url, headers, data)
+
+
+def _urllib_exchange(method, url, headers, data):
+    req = urllib.request.Request(url, data=data, method=method)
+    for name, value in headers.items():
+        req.add_header(name, value)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=30) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        raise JobError("写库失败 HTTP %s" % exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise JobError("写库连接失败") from exc
+    return status, raw
+
+
+class FetchRunDb:
+    def __init__(self, enabled, url, key, transport):
+        self.enabled = enabled
+        self.url = url
+        self.key = key
+        self.transport = transport
+        self.previews = []
+
+    def note(self, op, row, job_id=None, match_status=None):
+        item = {"op": op, "row": json.loads(json.dumps(row))}
+        if job_id is not None:
+            item["job_id"] = job_id
+        if match_status is not None:
+            item["match_status"] = match_status
+        self.previews.append(item)
+
+    def insert(self, row):
+        _require_gates_false(row)
+        if not self.enabled:
+            self.note("insert", row)
+            return json.loads(json.dumps(row))
+        rows = self._rows("POST", "", row, "return=representation")
+        if len(rows) != 1:
+            raise JobError("写库响应不正确")
+        return rows[0]
+
+    def update(self, job_id, match_status, patch):
+        _require_gates_false(patch)
+        if not self.enabled:
+            self.note("update", patch, job_id=job_id, match_status=match_status)
+            merged = json.loads(json.dumps(patch))
+            return merged
+        query = "job_id=eq.%s&status=eq.%s" % (
+            urllib.parse.quote(str(job_id), safe=""),
+            urllib.parse.quote(str(match_status), safe=""),
+        )
+        rows = self._rows("PATCH", query, patch, "return=representation")
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise JobError("写库响应不正确")
+        return rows[0]
+
+    def get(self, job_id):
+        if not self.enabled:
+            raise JobError("写库需要 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY")
+        query = "select=%s&job_id=eq.%s&limit=1" % (
+            SELECT_COLUMNS, urllib.parse.quote(str(job_id), safe=""),
+        )
+        rows = self._rows("GET", query, None, None)
+        if not rows:
+            return None
+        return rows[0]
+
+    def latest(self, month):
+        if not self.enabled:
+            raise JobError("写库需要 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY")
+        rows = self._rows("GET", latest_rest_query(month), None, None)
+        if not rows:
+            return None
+        return rows[0]
+
+    def queued(self):
+        if not self.enabled:
+            raise JobError("写库需要 SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY")
+        query = (
+            "select=%s&status=eq.queued&order=created_at.asc,job_id.asc&limit=100"
+            % SELECT_COLUMNS
+        )
+        rows = self._rows("GET", query, None, None)
+        if len(rows) >= 100:
+            raise JobError("排队任务达到读取上限，已中止")
+        return rows
+
+    def _rows(self, method, query, body, prefer):
+        if body is not None:
+            _require_gates_false(body)
+        status, raw = _exchange(
+            method, _rest_url(self.url, query), self.key, body, prefer, self.transport,
+        )
+        if status == 409:
+            raise JobError("任务号冲突", exit_code=1)
+        if status is None or status >= 400:
+            raise JobError("写库失败 HTTP %s" % status)
+        if status == 204 or raw in (None, b"", ""):
+            if method == "GET":
+                return []
+            raise JobError("写库响应不正确")
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise JobError("写库响应不正确") from exc
+        if not isinstance(data, list):
+            raise JobError("写库响应不正确")
+        return data
 
 
 if __name__ == "__main__":
