@@ -4,12 +4,13 @@
 
 两条写路径都只碰 public.salary_realtime_draft。默认不写库。
 真正写库要同时成立：
-  1. 环境变量 ALLOW_APPLY_REALTIME_DRAFT=true（与灌数脚本同一道闸）
+  1. 环境变量 ALLOW_EMPLOYEE_DRAFT_WRITE=true（独立闸，不读灌数闸 ALLOW_APPLY_REALTIME_DRAFT）
   2. apply=True / 命令行 --apply
+只开 ALLOW_APPLY_REALTIME_DRAFT 不放行本路径。灌数脚本的双闸保持原样。
 pipeline_config.json 的 UPLOAD / APPLY 保持 false。本模块只读这两键，不改文件，
 也不靠它们放行。
 
-十月禁灌：目标月 2026-10 直接拒绝，双闸开齐也不写。
+十月禁灌：目标月 2026-10 直接拒绝，ALLOW_EMPLOYEE_DRAFT_WRITE 与 --apply 开齐也不写。
 生产禁盲开：没有第三道「生产放行」开关。密钥只从环境读取，不进 argv、不进仓库。
 
 占位（在职保存成功后）：
@@ -27,7 +28,8 @@ pipeline_config.json 的 UPLOAD / APPLY 保持 false。本模块只读这两键�
   当月没有行：先走占位插入，再按读回的行写底薪（读回若已有手填补贴，仍保留）。
 
 本模块不算薪、不抓数、不写 migration、不写 employees。
-web 没有放在本仓：服务端在员工写入成功之后调用下面两个函数，或调用同目录 CLI。
+web 在 Vercel 用服务端 Route 按同契约直写 draft（service role），不必在线上跑本 CLI。
+CLI 留给本机 / ops。行为字段与占位、同步规则不变。
 """
 
 import argparse
@@ -49,6 +51,7 @@ DEFAULT_CONFIG = REPO_ROOT / "docs" / "fetch-pipeline" / "pipeline_config.json"
 APPLY_PATH = REPO_ROOT / "scripts" / "apply_realtime_payroll_draft.py"
 PAYROLL_PATH = REPO_ROOT / "scripts" / "payroll" / "realtime_payroll.py"
 
+ENV_GATE = "ALLOW_EMPLOYEE_DRAFT_WRITE"
 OCTOBER_NO_SEED = "2026-10"
 SOURCE_PLACEHOLDER = "employee_placeholder"
 CALIBER_BASE = "employee_placeholder|pending_payroll|base_follows_table"
@@ -127,7 +130,10 @@ def guard_write_table(table):
 
 
 def env_gate_open(env):
-    return apply_mod().env_gate_open(env)
+    """占位与底薪同步的独立闸。不读 ALLOW_APPLY_REALTIME_DRAFT。"""
+    if env is None:
+        env = os.environ
+    return str(env.get(ENV_GATE, "")).strip().lower() == "true"
 
 
 def _https_base(base_url):
@@ -168,7 +174,8 @@ def credentials(env):
     key = (env.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
     if not url or not key:
         raise DraftWriteRejected(
-            "双闸已开，但缺少 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY，未写库", code=1)
+            "%s=true 与 --apply 已同时成立，但缺少 SUPABASE_URL / "
+            "SUPABASE_SERVICE_ROLE_KEY，未写库" % ENV_GATE, code=1)
     return url, key
 
 
@@ -779,15 +786,16 @@ def _run(mode, employee, month, *, now, env, apply, tz_name, existing_reader, wr
 
 def render(result):
     """stdout 契约。不打印密钥。"""
-    gate = apply_mod().ENV_GATE
+    gate = ENV_GATE
     phase = "apply" if result["gate_env"] and result["apply_flag"] else "dry-run"
     lines = [
         "月份 %s（时区 %s）" % (result["month"], result["tz_name"]),
         "十月禁灌：拒绝 %s 写入。生产禁盲开：默认不写库，写库须 %s=true 与 --apply。"
+        "只开 ALLOW_APPLY_REALTIME_DRAFT 不放行。"
         % (OCTOBER_NO_SEED, gate),
         "pipeline_config UPLOAD=%s APPLY=%s（本脚本不修改这两键，也不靠它们放行）"
         % (str(result["config_upload"]).lower(), str(result["config_apply"]).lower()),
-        "双闸：%s=%s --apply=%s → %s" % (
+        "写库闸：%s=%s --apply=%s → %s（不读 ALLOW_APPLY_REALTIME_DRAFT）" % (
             gate, str(result["gate_env"]).lower(), str(result["apply_flag"]).lower(), phase),
         "person_name=%s work_role=%s action=%s source=%s base_amount=%s gross_amount=%s net_amount=%s"
         % (result.get("person_name"), result.get("work_role"), result.get("action"),
@@ -852,7 +860,8 @@ def build_parser(mode):
     ap.add_argument("--employment-status", default=None, help="在职 或 离职。省略且不读表时按在职")
     ap.add_argument("--month", default=None, help="YYYY-MM。省略则用 pipeline 时区的日历当月。2026-10 拒绝")
     ap.add_argument("--apply", action="store_true",
-                    help="与 ALLOW_APPLY_REALTIME_DRAFT=true 同时成立才写库")
+                    help="与 ALLOW_EMPLOYEE_DRAFT_WRITE=true 同时成立才写库；"
+                         "只开 ALLOW_APPLY_REALTIME_DRAFT 不放行")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG),
                     help="pipeline_config.json（只读，不修改 UPLOAD/APPLY）")
     return ap

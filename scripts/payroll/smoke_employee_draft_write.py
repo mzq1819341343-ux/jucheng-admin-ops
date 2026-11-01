@@ -105,9 +105,15 @@ def main():
     assert pay.EFFECTIVE_FROM == "2026-10"
     assert pay.HARD_EXCLUDED == ("吕文飞", "杨燕辉")
     assert apply.ENV_GATE == "ALLOW_APPLY_REALTIME_DRAFT"
+    assert mod.ENV_GATE == "ALLOW_EMPLOYEE_DRAFT_WRITE"
+    assert mod.ENV_GATE != apply.ENV_GATE
     assert mod.env_gate_open({}) is False
-    assert mod.env_gate_open({apply.ENV_GATE: "true"}) is True
-    assert mod.env_gate_open({apply.ENV_GATE: "1"}) is False
+    assert mod.env_gate_open({mod.ENV_GATE: "false"}) is False
+    assert mod.env_gate_open({mod.ENV_GATE: "1"}) is False
+    assert mod.env_gate_open({mod.ENV_GATE: "true"}) is True
+    assert mod.env_gate_open({apply.ENV_GATE: "true"}) is False
+    assert mod.env_gate_open({apply.ENV_GATE: "true", mod.ENV_GATE: ""}) is False
+    assert mod.env_gate_open({apply.ENV_GATE: "true", mod.ENV_GATE: "true"}) is True
 
     sql11 = SQL11.read_text(encoding="utf-8")
     sql16 = SQL16.read_text(encoding="utf-8")
@@ -126,7 +132,8 @@ def main():
         raise SystemExit("非目标表应被拒绝")
 
     env_closed = {}
-    env_open = {apply.ENV_GATE: "true"}
+    env_seed_only = {apply.ENV_GATE: "true"}
+    env_open = {mod.ENV_GATE: "true"}
     log = Log()
     code, out, err = run_main(
         mod, "placeholder",
@@ -142,6 +149,8 @@ def main():
     assert "不因角色改成 0" in out
     assert "DO NOTHING" in out
     assert "UPLOAD=false" in out and "APPLY=false" in out
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in out
+    assert "不读 ALLOW_APPLY_REALTIME_DRAFT" in out
     assert "已占位" not in out
 
     code, out, err = run_main(
@@ -156,6 +165,32 @@ def main():
          "--month", "2026-11"],
         env_open, reader=log.reader, writer=log.insert)
     assert code == 0 and "dry-run" in out and log.events == [], err
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=true" in out and "--apply=false" in out
+
+    # 灌数闸单独打开，不放行占位 / 底薪写。
+    seed_only = Log()
+    code, out, err = run_main(
+        mod, "placeholder",
+        ["--person-name", "示例甲", "--base-salary", "2000", "--work-role", "上门",
+         "--month", "2026-11", "--apply"],
+        env_seed_only, reader=seed_only.reader, writer=seed_only.insert)
+    assert code == 0 and "dry-run" in out and "未写库" in out and seed_only.events == [], err
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in out and "--apply=true" in out
+    blocked = mod.ensure_employee_placeholder(
+        person("1800", "上门"), month="2026-11", now=NOW, env=env_seed_only, apply=True,
+        existing_reader=seed_only.reader, writer=seed_only.insert)
+    assert blocked["action"] == "dry-run" and blocked["wrote"] is False
+    assert blocked["gate_env"] is False and blocked["apply_flag"] is True
+    code, out, err = run_main(
+        mod, "sync",
+        ["--person-name", "示例甲", "--base-salary", "2000", "--month", "2026-11", "--apply"],
+        env_seed_only, reader=seed_only.reader, writer=seed_only.insert, patcher=seed_only.patch)
+    assert code == 0 and "dry-run" in out and "未写库" in out and seed_only.events == [], err
+    sync_blocked = mod.sync_employee_base_salary(
+        person("2000", "上门"), month="2026-11", now=NOW, env=env_seed_only, apply=True,
+        existing_reader=seed_only.reader, writer=seed_only.insert, patcher=seed_only.patch)
+    assert sync_blocked["action"] == "dry-run" and sync_blocked["wrote"] is False
+    assert sync_blocked["gate_env"] is False
 
     # 上门跟表：1800 原样占位，业绩/补贴/奖金为 0。
     inserted = Log()
@@ -491,15 +526,18 @@ def main():
     assert net == probe["net_amount"] == "1518.50"
 
     child_env = os.environ.copy()
-    child_env.pop("ALLOW_APPLY_REALTIME_DRAFT", None)
-    child_env.pop("SUPABASE_SERVICE_ROLE_KEY", None)
-    child_env.pop("SUPABASE_URL", None)
+    for key in (
+        "ALLOW_APPLY_REALTIME_DRAFT", "ALLOW_EMPLOYEE_DRAFT_WRITE",
+        "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL",
+    ):
+        child_env.pop(key, None)
     proc = subprocess.run(
         [sys.executable, str(ENSURE), "--person-name", "示例甲", "--base-salary", "2000",
          "--work-role", "上门", "--month", "2026-11"],
         cwd=str(REPO), env=child_env, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     assert "未写库" in proc.stdout and "employee_placeholder" in proc.stdout
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in proc.stdout
     assert "1800" not in proc.stdout
     proc_sync = subprocess.run(
         [sys.executable, str(SYNC), "--person-name", "示例甲", "--base-salary", "2200",
@@ -507,6 +545,45 @@ def main():
         cwd=str(REPO), env=child_env, capture_output=True, text=True, check=False)
     assert proc_sync.returncode == 0, proc_sync.stderr
     assert "未写库" in proc_sync.stdout and "十月禁灌" in proc_sync.stdout
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in proc_sync.stdout
+
+    old_only = dict(child_env)
+    old_only["ALLOW_APPLY_REALTIME_DRAFT"] = "true"
+    proc_old = subprocess.run(
+        [sys.executable, str(ENSURE), "--person-name", "示例甲", "--base-salary", "2000",
+         "--work-role", "上门", "--month", "2026-11", "--apply"],
+        cwd=str(REPO), env=old_only, capture_output=True, text=True, check=False)
+    assert proc_old.returncode == 0, proc_old.stderr
+    assert "未写库" in proc_old.stdout and "dry-run" in proc_old.stdout
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in proc_old.stdout
+    proc_old_sync = subprocess.run(
+        [sys.executable, str(SYNC), "--person-name", "示例甲", "--base-salary", "2200",
+         "--month", "2026-11", "--apply"],
+        cwd=str(REPO), env=old_only, capture_output=True, text=True, check=False)
+    assert proc_old_sync.returncode == 0, proc_old_sync.stderr
+    assert "未写库" in proc_old_sync.stdout and "ALLOW_EMPLOYEE_DRAFT_WRITE=false" in proc_old_sync.stdout
+
+    new_gate = dict(child_env)
+    new_gate["ALLOW_EMPLOYEE_DRAFT_WRITE"] = "true"
+    proc_gate = subprocess.run(
+        [sys.executable, str(ENSURE), "--person-name", "示例甲", "--base-salary", "2000",
+         "--work-role", "上门", "--month", "2026-11"],
+        cwd=str(REPO), env=new_gate, capture_output=True, text=True, check=False)
+    assert proc_gate.returncode == 0, proc_gate.stderr
+    assert "未写库" in proc_gate.stdout and "ALLOW_EMPLOYEE_DRAFT_WRITE=true" in proc_gate.stdout
+    assert "--apply=false" in proc_gate.stdout
+    proc_apply = subprocess.run(
+        [sys.executable, str(ENSURE), "--person-name", "示例甲", "--base-salary", "2000",
+         "--work-role", "上门", "--month", "2026-11", "--apply"],
+        cwd=str(REPO), env=new_gate, capture_output=True, text=True, check=False)
+    assert proc_apply.returncode == 1, proc_apply.stdout
+    assert "ALLOW_EMPLOYEE_DRAFT_WRITE" in proc_apply.stderr and "未写库" in proc_apply.stderr
+    proc_oct = subprocess.run(
+        [sys.executable, str(SYNC), "--person-name", "示例甲", "--base-salary", "2000",
+         "--month", "2026-10", "--apply"],
+        cwd=str(REPO), env=new_gate, capture_output=True, text=True, check=False)
+    assert proc_oct.returncode == 2, proc_oct.stdout
+    assert "十月禁灌" in proc_oct.stderr
 
     assert CONFIG.read_bytes() == cfg_before
     again = json.loads(CONFIG.read_text(encoding="utf-8"))
