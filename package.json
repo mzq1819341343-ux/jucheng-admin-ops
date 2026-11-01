@@ -12,7 +12,8 @@
     "regression:status": "node scripts/regression/audit-status-consistency.mjs",
     "regression:review": "node scripts/regression/audit-review-export.mjs",
     "shots": "node scripts/regression/capture-help-shots.mjs",
-    "salary:verify": "node scripts/salary-promotion/verify-expectations.mjs"
+    "salary:verify": "node scripts/salary-promotion/verify-expectations.mjs",
+    "fetch-jobs:smoke": "python3 scripts/smoke_fetch_jobs.py"
   },
   "devDependencies": {
     "playwright-core": "^1.64.1"
