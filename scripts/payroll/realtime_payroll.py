@@ -5,22 +5,26 @@
 口径（产品拍板 A1 / B1 / C 过渡 JSON / D，与 docs/工资字段映射_新口径.md 一致）：
   - 名单每人必须有 role ∈ {上门, 门店}。缺 role、仅姓名列表、或根本没给名单
     → 拒绝出草案（退出码 4），禁止默认角色。
-  - role=上门：底薪强制 0（名单或 employees 写成 2000 也不采用）。
-    名下全部订单的分润合计 ×50% → door，不再要求取货方式=上门。
+  - 底薪：上门与门店一样取名单 / employees.base_salary，缺省 2000
+    （基础 1000 + 全勤 500 + 拉新 500）。与 2000 不同的自定义底薪整笔记入 basic，
+    全勤/拉新 = 0。
+  - role=上门：名下全部订单的分润合计 ×50% → door，不再要求取货方式=上门。
     上门角色的订单不进 online。
     门店提成只计交易方式精确等于「门店订单」的金额 × 固定 4%（不用店阶梯）。
     金额优先「订单金额（不含券）」，该列为空则回退「订单金额」。
     O2O订单、上门订单及其它交易方式不进这 4%。
   - role=门店 且 取货方式=上门：不含券金额 → online（×1%），不进 door，
-    不进门店阶梯基数，也不进该人的门店份额。底薪仍按名单，缺省 2000。
+    不进门店阶梯基数，也不进该人的门店份额。
   - 来源类型 ≠ 门店 仍 ×1%，但只对门店角色（ONLINE_MODE=source_not_门店，不改）。
   - 门店阶梯仍按不含券定档：≥60000→4%，≥30000→3%，否则 0。只用于门店角色。
     不在名单上的订单仍计入全店定档（指令193），不计入个人份额。
     上门角色的「订单金额」回退额不进阶梯基数。
-  - 配件 = 实付 × 30%（ACCESSORIES_PCT）。--accessories-input 缺文件则该项为 0
-    并在 assumptions 注明。禁止用旧机 191 列冒充配件。
-  - 门店角色底薪取名单 base_salary，缺省 2000（基础 1000 + 全勤 500 + 拉新 500）。
-    与 2000 不同的自定义底薪整笔记入 basic，全勤/拉新 = 0。
+  - 配件 = 按人汇总金额 × 30%（ACCESSORIES_PCT）。
+    人优先「创建订单员工」，兜底「归属人」「销售人」。
+    金额优先「加盟商总实收金额」，缺则「业绩金额」，再兜底「实付金额」。
+    时间优先「订单成交时间」，兜底完成时间 / 销售时间 / 日期 / 完成日期。
+    未传 --accessories-input 或文件不存在则该项为 0，并在 assumptions 注明。
+    禁止用旧机 191 列冒充配件。
   - gross = base + door + online + store + accessories。
 
 名单来源（二选一，禁止合并）：
@@ -52,8 +56,7 @@ JSON 形状（不接受字符串姓名；示例用假名，不是在职名单）
     ],
     "excluded": [{"person": "示例丙", "reason": "离职"}]
   }
-  name 与 person_name 二选一。base_salary 可省略。
-  role=上门 时算数强制底薪 0，JSON 里的 2000 不会进应发。
+  name 与 person_name 二选一。base_salary 可省略，上门与门店缺省都是 2000。
 
 用法：
   # 默认：只读在职员工表（不写库）
@@ -101,7 +104,7 @@ STORE_BASE_FIELD = "订单金额（不含券）"
 ORDER_AMOUNT_FIELD = "订单金额"
 TRADE_FIELD = "交易方式"
 TRADE_STORE_ORDER = "门店订单"
-ACCESSORIES_PCT = Decimal("0.30")  # 实付 × 30%。废止 accessories_tiers。
+ACCESSORIES_PCT = Decimal("0.30")  # 按人汇总配件金额 × 30%。废止 accessories_tiers。
 DOOR_PROFIT_PCT = Decimal("0.50")
 DOOR_ROLE_STORE_PCT = Decimal("0.04")  # 上门角色：交易方式=门店订单 × 固定 4%
 ROLES = ("上门", "门店")
@@ -119,14 +122,15 @@ EXIT_ROSTER = 4
 
 CENT = Decimal("0.01")
 
-# 配件必须是独立导出。这些列出现即视为旧机 191 订单，禁止拿来当配件实付。
+# 配件必须是独立导出。这些列出现即视为旧机 191 订单，禁止拿来当配件金额。
 ORDER_IMPERSONATION_COLS = frozenset({
     "门店验货人", "订单金额（不含券）", "分润金额", "取货方式", "来源类型",
     "订单金额", "结算金额",
 })
-ACCESSORY_PERSON_COLS = ("归属人", "销售人")
-ACCESSORY_AMOUNT_COL = "实付金额"
-ACCESSORY_DATE_COLS = ("完成时间", "销售时间", "日期", "完成日期")
+# 加盟后台 fitting-board「配件销售订单明细」优先；旧导出列作兜底。元组顺序即优先级。
+ACCESSORY_PERSON_COLS = ("创建订单员工", "归属人", "销售人")
+ACCESSORY_AMOUNT_COLS = ("加盟商总实收金额", "业绩金额", "实付金额")
+ACCESSORY_DATE_COLS = ("订单成交时间", "完成时间", "销售时间", "日期", "完成日期")
 
 EMPLOYEES_SELECT = "person_name,work_role,base_salary,employment_status,user_id"
 
@@ -246,10 +250,6 @@ def parse_roster_document(doc):
             base, custom = classify_base(item.get("base_salary"), provided)
         except DraftRejected:
             raise DraftRejected("拒绝出草案：%s 的 base_salary 不是合法金额" % name)
-        if role == "上门":
-            # 老板原话：上门底薪强制 0，表内或 JSON 的 base_salary 不采用。
-            base = Decimal("0")
-            custom = False
         people[name] = {"name": name, "role": role, "base_salary": base, "custom_base": custom}
     reasons = {}
     excluded = doc.get("excluded") or []
@@ -402,13 +402,26 @@ def _sheet_matrix(af, path):
     raise DraftRejected("拒绝出草案：配件输入是空表", code=EXIT_ERROR)
 
 
+def _pick_col(header_set, candidates):
+    """按候选顺序取第一列存在的表头。候选顺序即优先级。"""
+    return next((c for c in candidates if c in header_set), None)
+
+
 def load_accessories(path, month, af):
-    """独立配件导出 → {姓名: 当月实付}。缺文件不报错，返回空并注明缺源。"""
+    """独立配件导出 → {姓名: 当月金额}。缺文件不报错，返回空并注明缺源。
+
+    列对齐加盟后台 fitting-board「配件销售订单明细」：
+    人优先创建订单员工；金额优先加盟商总实收金额，缺则业绩金额；
+    时间优先订单成交时间。旧列归属人/销售人、实付金额、完成时间等仍作兜底。
+    """
     none = {
         "pct": "30|source=none",
         "source": "none",
         "rows_in_month": 0,
         "unmatched_people": 0,
+        "person_col": None,
+        "amount_col": None,
+        "date_col": None,
     }
     if not path:
         none["note"] = (
@@ -437,17 +450,21 @@ def load_accessories(path, month, af):
     if impersonated:
         raise DraftRejected(
             "禁止用旧机 191 订单列冒充配件（发现 %s）。"
-            "配件须为独立导出，列含归属人或销售人、实付金额" % "、".join(sorted(impersonated)),
+            "配件须为独立导出：人优先创建订单员工（兜底归属人、销售人），"
+            "金额优先加盟商总实收金额（缺则业绩金额，再兜底实付金额）"
+            % "、".join(sorted(impersonated)),
             code=EXIT_ERROR)
-    person_col = next((c for c in ACCESSORY_PERSON_COLS if c in hset), None)
-    if person_col is None or ACCESSORY_AMOUNT_COL not in hset:
+    person_col = _pick_col(hset, ACCESSORY_PERSON_COLS)
+    amount_col = _pick_col(hset, ACCESSORY_AMOUNT_COLS)
+    if person_col is None or amount_col is None:
         raise DraftRejected(
-            "拒绝出草案：配件输入缺少列。需要归属人或销售人，以及实付金额",
+            "拒绝出草案：配件输入缺少列。需要创建订单员工、归属人或销售人，"
+            "以及加盟商总实收金额、业绩金额或实付金额",
             code=EXIT_ERROR)
-    date_col = next((c for c in ACCESSORY_DATE_COLS if c in hset), None)
+    date_col = _pick_col(hset, ACCESSORY_DATE_COLS)
     if date_col is None:
         raise DraftRejected(
-            "拒绝出草案：配件输入缺少日期列（完成时间、销售时间或日期）",
+            "拒绝出草案：配件输入缺少日期列（订单成交时间、完成时间、销售时间或日期）",
             code=EXIT_ERROR)
     idx = {h: i for i, h in enumerate(header)}
 
@@ -463,12 +480,13 @@ def load_accessories(path, month, af):
         if month_of(cell(row, date_col)) != month:
             continue
         name = cell(row, person_col)
-        amount = to_decimal(cell(row, ACCESSORY_AMOUNT_COL))
+        amount = to_decimal(cell(row, amount_col))
         if not name or amount is None:
             continue
         if amount < 0:
             raise DraftRejected(
-                "拒绝出草案：配件实付金额为负（%s）" % name, code=EXIT_ERROR)
+                "拒绝出草案：配件金额为负（%s，列 %s）" % (name, amount_col),
+                code=EXIT_ERROR)
         paid[name] += amount
         rows_in += 1
     resolved = str(file_path.resolve())
@@ -476,16 +494,17 @@ def load_accessories(path, month, af):
         "pct": "30|source=%s" % resolved,
         "source": resolved,
         "rows_in_month": rows_in,
-        "note": "配件实付×30%%（%s），月内计入 %d 行" % (file_path.name, rows_in),
+        "note": "配件金额（%s）×30%%（%s），月内计入 %d 行" % (
+            amount_col, file_path.name, rows_in),
         "unmatched_people": 0,
+        "person_col": person_col,
+        "amount_col": amount_col,
+        "date_col": date_col,
     }
 
 
 def base_view(person, roster, exceptions):
-    if roster[person]["role"] == "上门":
-        zero = Decimal("0")
-        return zero, {"basic": zero, "attendance": zero, "new_customer": zero}, (
-            "上门角色无底薪（名单、employees 上的 base_salary 与 --base-exceptions 均不采用）")
+    """上门与门店同一路径：例外覆盖，否则名单 base_salary，缺省 2000。"""
     if person in exceptions:
         base = money(exceptions[person])
         return base, {"basic": base, "attendance": Decimal("0"), "new_customer": Decimal("0")}, (
@@ -516,8 +535,11 @@ def main(argv=None, env=None, employees_fetcher=None):
                          "凭据 SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY）。"
                          "json 须同时给 --active-roster。环境变量 ROSTER_SOURCE 同义，冲突则拒绝")
     ap.add_argument("--accessories-input", default=None,
-                    help="配件独立导出（csv/xlsx）：归属人或销售人、实付金额、日期。"
-                         "缺文件则配件=0 并注明。禁止用旧机 191 列冒充")
+                    help="配件独立导出（csv/xlsx，fitting-board 配件销售订单明细）。"
+                         "人优先创建订单员工（兜底归属人、销售人）；"
+                         "金额优先加盟商总实收金额，缺则业绩金额，再兜底实付金额；"
+                         "时间优先订单成交时间（兜底完成时间、销售时间、日期）。"
+                         "未传或文件不存在则配件=0 并注明。禁止用旧机 191 列冒充")
     args = ap.parse_args(argv)
     if env is None:
         env = os.environ
@@ -570,7 +592,7 @@ def main(argv=None, env=None, employees_fetcher=None):
     unmatched = sorted(name for name in accessory_paid if name not in roster)
     accessory_meta["unmatched_people"] = len(unmatched)
     if unmatched and accessory_meta["source"] != "none":
-        accessory_meta["note"] += "；归属人不在在职名单的实付未计入 %d 人" % len(unmatched)
+        accessory_meta["note"] += "；人不在在职名单的配件金额未计入 %d 人" % len(unmatched)
 
     store_base = defaultdict(Decimal)
     store_profit_base = defaultdict(Decimal)
@@ -755,7 +777,7 @@ def main(argv=None, env=None, employees_fetcher=None):
         "role=上门的订单不进 online",
         "上门提成【上门角色】：名下全部订单的分润合计×50%"
         "（door_profit_pct=50|role=上门_all_profit），不限取货方式。"
-        "role=门店不进 door。底薪强制 0",
+        "role=门店不进 door",
         "上门角色的门店提成：仅交易方式=门店订单。"
         "金额优先订单金额（不含券），为空则回退订单金额，合计×固定4%"
         "（不用店阶梯）。O2O订单、上门订单及其它交易方式不计入。"
@@ -763,13 +785,16 @@ def main(argv=None, env=None, employees_fetcher=None):
         "门店角色的门店提成【A1】：不含券按店定档（≥60000→4%，≥30000→3%，否则 0%）。"
         "role=门店的上门单不进阶梯基数、不进个人门店份额。"
         "不在名单上的订单仍计入定档，不进个人份额",
-        "配件提成【已拍板 B1/D】：实付×30%（accessories_pct=30），废止 accessories_tiers。"
+        "配件提成【已拍板 B1/D】：按人汇总配件金额×30%（accessories_pct=30），废止 accessories_tiers。"
+        "人优先创建订单员工（兜底归属人、销售人）；"
+        "金额优先加盟商总实收金额，缺则业绩金额，再兜底实付金额；"
+        "时间优先订单成交时间（兜底完成时间、销售时间、日期）。"
         + accessory_meta["note"],
-        "底薪：role=上门强制 0。role=门店取名单 base_salary，缺省 2000"
+        "底薪：上门与门店都取名单 base_salary，缺省 2000"
         "（基础1000+全勤500+拉新500）。与缺省不同的自定义底薪整笔记入 basic，全勤/拉新=0。"
-        "--base-exceptions 只可能覆盖门店角色，不覆盖上门角色",
+        "--base-exceptions 可覆盖名单上的上门与门店（非现行路径，缺省不读）",
         "在职名单每人必须有 role∈{上门,门店}。缺 role、仅姓名列表或未提供名单则拒绝出草案，不默认角色。"
-        "零单在职人员仍出一行：上门底薪为 0，门店为名单底薪",
+        "零单在职人员仍出一行，底薪为名单 base_salary（缺省 2000）",
         "硬排除仅吕文飞、杨燕辉。张浩冉、张静怡已移出硬排除，出现在计薪名单不再因此中止",
         "分润金额或实付金额为空的行按缺失不补值，不计入对应基数",
         "gross = base + door + online + store + accessories + subsidy + bonus。"
@@ -782,7 +807,7 @@ def main(argv=None, env=None, employees_fetcher=None):
         assumptions.append(
             "名单来源 employees（默认）：employment_status=在职 的 work_role 与 base_salary。"
             "只读，未写库，未与 JSON 合并。缺 work_role 的在职行会拒绝出草案。"
-            "上门底薪忽略表内 base_salary")
+            "上门与门店都采用表内 base_salary，缺省 2000")
     else:
         assumptions.append(
             "名单来源 JSON（离线/显式 --active-roster）。未读 employees，未与表合并")
@@ -803,7 +828,7 @@ def main(argv=None, env=None, employees_fetcher=None):
         "caliber": {
             "online_mode": "source_not_门店+store_role_door_as_online|door_role_no_online",
             "door_profit_pct": "50|role=上门_all_profit",
-            "door_role_base": "0",
+            "door_role_base": "roster|default=2000",
             "door_role_store_pct": "4|trade=门店订单|amt=不含券_else_订单金额",
             "accessories_pct": accessory_meta["pct"],
             "roster": roster_source,
@@ -813,6 +838,9 @@ def main(argv=None, env=None, employees_fetcher=None):
             "source": accessory_meta["source"],
             "rows_in_month": accessory_meta["rows_in_month"],
             "unmatched_people": accessory_meta["unmatched_people"],
+            "person_col": accessory_meta.get("person_col"),
+            "amount_col": accessory_meta.get("amount_col"),
+            "date_col": accessory_meta.get("date_col"),
             "note": accessory_meta["note"],
         },
         "assumptions": assumptions,
@@ -873,7 +901,7 @@ def main(argv=None, env=None, employees_fetcher=None):
         w.writerow(["月份", "验货人", "角色", "单量", "底薪", "基础", "全勤", "拉新",
                     "分润计入单量", "分润基数", "上门提成(50%·上门角色全部订单)",
                     "线上单量", "线上金额(不含券)", "线上提成(1%)",
-                    "门店提成基数", "门店提成", "配件实付", "配件提成(实付×30%)",
+                    "门店提成基数", "门店提成", "配件金额", "配件提成(金额×30%)",
                     "补贴", "奖金",
                     "分润合计", "应发草案合计", "分润缺失行", "不含券缺失行"])
         for p in people:
@@ -889,8 +917,8 @@ def main(argv=None, env=None, employees_fetcher=None):
     print("输入 %d 行 → 月份 %s 内 %d 行（月外 %d 行）" % (len(rows), month, len(in_month), out_month))
     print("线上口径 ONLINE_MODE=%s；role=门店且取货方式=上门 的不含券也×1%%，不进门店阶梯。"
           "role=上门不进线上" % ONLINE_MODE)
-    print("上门角色：无底薪；全部订单分润×50%；仅交易方式=门店订单×固定4%"
-          "（不含券空则回退订单金额）。门店角色底薪缺省 2000")
+    print("上门角色：底薪跟名单（缺省 2000）；全部订单分润×50%；仅交易方式=门店订单×固定4%"
+          "（不含券空则回退订单金额）。门店角色底薪同样缺省 2000")
     print("名单来源 %s；单量锚点 PASS：计薪单量 %d + 排除单量 %d == 月内行数 %d"
           % (roster_source, total_orders, excluded_orders, len(in_month)))
     for s in sorted(store_count):
