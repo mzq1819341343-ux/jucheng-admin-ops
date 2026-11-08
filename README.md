@@ -25,6 +25,8 @@ scripts/regression/       前端回归（脚本在本仓；app/、public/、lib/
 scripts/salary-promotion/ 工资晋升 dry-run（不连库）
 scripts/fetch_jobs.py     抓取任务：claim / complete 写 salary_fetch_runs，文件只作缓存
 scripts/smoke_fetch_jobs.py
+scripts/daily_person_store_sales.py  人店日销售只读；CSV 种子默认不写库
+scripts/smoke_daily_person_store_sales.py
 ```
 
 ## Supabase 初始化（一次性）
@@ -48,6 +50,18 @@ python3 docs/fetch-pipeline/auto_fetch.py --check
 ```bash
 python3 scripts/smoke_fetch_jobs.py
 ```
+
+## 人店日销售概览
+
+总览走势和排名的实绩读 `public.daily_person_store_sales`（人 × 店 × 日）。这不是 `monthly_sales_targets` 里的月目标。契约、两个读形状和 web Route 怎么照着做，见 `docs/契约_人店日销售概览.md`。
+
+```bash
+python3 scripts/daily_person_store_sales.py daily --month 2026-11
+python3 scripts/daily_person_store_sales.py detail --month 2026-11
+python3 scripts/smoke_daily_person_store_sales.py
+```
+
+读库要 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`。CSV upsert 默认不做；要 `ALLOW_DAILY_SALES_SEED=true` 和 `--apply` 一起开。不读工资的 `UPLOAD` / `APPLY`。2026-11 的 56 行已经在库里，不要为了验收再写一遍。
 
 ## 实时工资草案
 

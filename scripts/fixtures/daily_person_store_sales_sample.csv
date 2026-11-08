@@ -1,0 +1,4 @@
+day,person_name,store_name,recycle_store_amount,recycle_online_amount,accessories_sales,n_old_machine,n_accessories
+2026-11-01,示例甲,示例店,100.50,20.00,1.25,2,1
+2026-11-01,示例乙,示例店,50.00,0.00,0.00,1,0
+2026-11-02,示例甲,示例店,10.10,5.02,0.47,,
